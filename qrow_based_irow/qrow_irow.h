@@ -3,78 +3,34 @@
  * IROW格式使用ROW解决COW的额外写的开销，同时使用COD解决ROW的文件碎片问题
  * */
 
-#define IROW_MAGIC (('I' << 24) | ('R' << 16) | ('O' << 8) | 'W')
-#define IROW_VERSION 1
-
-#define IROW_SNAPHEADER_MAGIC (('S' << 24) | ('N' << 16) | ('A' << 8) | 'P')
-
+#define QROW_MAGIC (('Q' << 24) | ('R' << 16) | ('O' << 8) | 'W')
+#define QROW_VERSION 1
 #define MIN_CLUSTER_BITS 9
 #define MAX_CLUSTER_BITS 21
-#define MAX_FILE_NAME_LENGTH 256
+#define MAX_FILE_NAME_LENGTH 128
+#define MAX_VM_SECTOR_NUM  1024 //虚拟磁盘包含的最大扇区数  2^20
+#define RRTYPE 'R'
+#define MAX_READ_SECTOR_NUM  8 //读操作读取的最大扇区数  2^11
+#define QROW_READ 1
+#define QROW_WRITE 2
+#define QROW_AIO_READ 3
+#define QROW_AIO_WRITE 4
 
-#define IROW_READ 1
-#define IROW_WRITE 2
-#define IROW_AIO_READ 3
-#define IROW_AIO_WRITE 4
-
-//#define IROW_CRYPT_NONE 0
-//#define IROW_CRYPT_AES  1
-
-typedef struct __attribute__((packed)) IRowMeta { // irow meta文件头
-    uint32_t magic; // 魔数
+typedef struct __attribute__((packed)) 	QRowMeta
+{ 
+    uint32_t magic;  //魔数 
     uint32_t version; // 版本
-    uint32_t copy_on_demand; // 按需拷贝标记
-    uint32_t nb_snapshots; // 快照的个数
     uint32_t cluster_size; // cluster大小，字节
     uint32_t cluster_bits; // cluster的位数
-    uint32_t sectors_per_cluster; // 一个cluster中的sector数量
+    uint32_t sectors_per_cluster;//每个cluster包括的扇区数 
     uint64_t total_clusters; // cluster的个数
     uint64_t disk_size; // 镜像大小，字节
-    char current_btmp[MAX_FILE_NAME_LENGTH]; // 当前bitmap文件
-    char backing_file[MAX_FILE_NAME_LENGTH]; // base image名称
-} IRowMeta;
+	uint64_t cluster_offset; //磁盘文件下一个可用cluster号
+	char img_file[MAX_FILE_NAME_LENGTH]; //镜像名称 
+	char map_file[MAX_FILE_NAME_LENGTH];//存储map数组的文件名称
+	char backing_file[MAX_FILE_NAME_LENGTH];//// base image名称
+}QRowMeta;
 
-typedef struct __attribute__((packed)) IRowSnapshotHeader {
-	uint32_t snap_magic; // snapshot header的魔数
-	char id_str[128]; // 快照的id，每个快照有唯一的id
-	char name[256]; // 名称，或者可以理解为说明，不同快照的name可以相同
-	char btmp_file[MAX_FILE_NAME_LENGTH]; // 该快照对应的btmp文件
-	char irvd_file[MAX_FILE_NAME_LENGTH]; // 该快照对应的irvd文件
-	char father_btmp_file[MAX_FILE_NAME_LENGTH]; // "父亲"对应的btmp文件
-	uint32_t vm_state_size;
-	uint32_t date_sec; // 距离1970年1月1日00：00：00的秒数
-	uint32_t date_nsec; // 日期的纳秒数，精确到1000，实际是用微秒数＊1000得到的
-	uint64_t vm_clock_nsec; // VM启动后的纳秒数
-	uint32_t nb_children; // 孩子快照个数
-	uint32_t is_deleted; // 是否已删除标志
-} IRowSnapshotHeader;
-
-typedef struct IRowSnapshot {
-	char *id_str;
-	char *name;
-	char *btmp_file;
-	char *irvd_file;
-	char *father_btmp_file;
-	uint32_t vm_state_size;
-	uint32_t date_sec; // 距离1970年1月1日00：00：00的秒数
-	uint32_t date_nsec; // 日期的纳秒数，精确到1000，实际是用微秒数＊1000得到的
-	uint64_t vm_clock_nsec; // VM启动后的纳秒数
-	uint32_t nb_children; // 孩子快照个数
-	uint32_t is_deleted; // 是否已删除标志
-} IRowSnapshot;
-
-typedef struct IRowCreateState {
-	uint64_t disk_size;
-	uint32_t cluster_size;
-	uint32_t cluster_bits;
-	uint32_t copy_on_demand;
-	char *meta_file; // meta文件
-	char *father_btmp_file; // 打开的bitmap文件对应的"父亲"bitmap文件
-	char *btmp_file; // 要创建的bitmap文件
-	char *irvd_file; // 要创建的bitmap文件对应的irvd文件
-	char *time_value; // 创建该结构题的时间16进制字符串（粗略的可以认为是创建磁盘镜像的时间），用做文件名的一部分
-	char *backing_file; // base image文件名
-} IRowCreateState;
 
 typedef struct ClusterCache {
 	uint8_t *cache;
@@ -107,6 +63,21 @@ typedef struct BDRVIrowState { //
     char *opened_btmp_file; // 打开的bitmap文件，可以和当前bitmap文件不同，例如打开"父亲"bitmap文件时
     char *irvd_file; // 打开的bitmap文件对应的磁盘镜像文件
 } BDRVIrowState;
+
+//存放的数据主要用于读写操作 
+typedef struct BDRVQrowState 
+{ 
+    uint32_t cluster_size; 
+    uint32_t sectors_per_cluster;
+    uint64_t total_clusters; 
+	uint64_t cluster_offset; 
+	uint64_t byte_offset;
+	uint64_t sector_offset;
+	uint64_t map_file[MAX_VM_SECTOR_NUM]; 
+	int img_file_fd;//打开的磁盘文件 
+	int log_file_fd;//打开的log文件 
+	int map_file_fd;//打开的存储map数组的文件 
+}BDRVQrowState;
 
 typedef struct ClusterBuffer {
 	uint8_t *buf;
