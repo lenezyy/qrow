@@ -135,6 +135,8 @@ int Qrow_open(QrowState *qrow_state, char *img_file, int flag, char *log_file)
 		printf("Can not open %s\n", img_file);
 		return 0;
 	}
+	
+	//整合刘寒青的代码时，没办法使用lseek这个函数 
 	uint64_t cur_disk_size = lseek(fd, 0, SEEK_END);//先获取文件大小
 	lseek(fd, 0, SEEK_SET);//将读写位置移动到文件开头处 
 	int readBytes = read(fd, qrow, sizeof(QrowHeader));

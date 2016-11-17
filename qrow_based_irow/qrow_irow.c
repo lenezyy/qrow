@@ -13,25 +13,25 @@
 BDRVqrowState **bqrows_cache = NULL; // 用于保存打开的father
 ClusterCache *cluster_cache = NULL; //用于缓存最近读取的1个cluster
 
-//#define qrow_DEBUG
+//#define QROW_DEBUG
 
-#ifdef qrow_DEBUG
-#define qrow_DEBUG_BEGIN_STR "\n----------------------------------------\n"
-#define qrow_DEBUG_END_STR "\n========================================\n"
+#ifdef QROW_DEBUG
+#define QROW_DEBUG_BEGIN_STR "\n----------------------------------------\n"
+#define QROW_DEBUG_END_STR "\n========================================\n"
 
-#define qrow_DEBUG_DETAIL
+#define QROW_DEBUG_DETAIL
 
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 
-//#define qrow_DEBUG_OPEN
-//#define qrow_DEBUG_SET_BIT
-#define qrow_DEBUG_ASSERT_CLUSTERS
-//#define qrow_DEBUG_SNAPSHOT_DELETE
-//#define qrow_DEBUG_READ
-#define qrow_DEBUG_WRITE
-//#define qrow_DEBUG_AIO_READV
-//#define qrow_DEBUG_AIO_WRITEV
-#define qrow_DEBUG_READ_MISSING_CLUSTSERS2
+//#define QROW_DEBUG_OPEN
+//#define QROW_DEBUG_SET_BIT
+#define QROW_DEBUG_ASSERT_CLUSTERS
+//#define QROW_DEBUG_SNAPSHOT_DELETE
+//#define QROW_DEBUG_READ
+#define QROW_DEBUG_WRITE
+//#define QROW_DEBUG_AIO_READV
+//#define QROW_DEBUG_AIO_WRITEV
+#define QROW_DEBUG_READ_MISSING_CLUSTSERS2
 
 static void dump_snapshot(qrowSnapshot *snap) {
 	printf("date_sec: %d\n", snap->date_sec);
@@ -195,7 +195,7 @@ static int get_bits_from_size(size_t size)
 
 static int qrow_probe(const uint8_t *buf, int buf_size, const char *filename)
 { // 检测魔数、版本并打分
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_probe()\n");
 	printf("buf_size: %d, filename: %s\n", buf_size, filename);
 #endif
@@ -205,13 +205,13 @@ static int qrow_probe(const uint8_t *buf, int buf_size, const char *filename)
     if (buf_size >= sizeof(QRowMeta) &&
         be32_to_cpu(qrow_meta->magic) == QROW_MAGIC &&
         be32_to_cpu(qrow_meta->version) == QROW_VERSION){
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("return 100" QROW_DEBUG_END_STR);
 #endif
         return 100;
     }
     else {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("return 0" QROW_DEBUG_END_STR);
 #endif
         return 0;
@@ -228,120 +228,49 @@ static int qrow_check_bitmap(BDRVqrowState *bqrows) {
 	return 1;
 }
 
-static int qrow_update_btmp(BDRVqrowState *bqrows) {
+static int qrow_update_map_file(BDRVqrowState *bqrows) {
 
 	int ret = 0;
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_update_btmp()\n");
-	printf("bitmap_is_dirty %d, vmstate_is_saved %d\n", bqrows->bitmap_is_dirty, bqrows->vmstate_is_saved);
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_update_map_file()\n");
+	printf("map_is_dirty %d\n", bqrows->map_is_dirty);
 #endif
-	if(bqrows->bitmap_is_dirty) {
-		if(bdrv_pwrite(bqrows->qrow_btmp, 0, bqrows->bitmap, bqrows->bitmap_size) != bqrows->bitmap_size) {
-			fprintf(stderr, "Failed to write the qrow bitmap data to %s\n", bqrows->opened_btmp_file);
+	if(bqrows->map_is_dirty) {
+		if(bdrv_pwrite(bqrows->qrow_map_file, 0, bqrows->map, sizeof(bqrows->map)) != sizeof(bqrows->map)) {
+			fprintf(stderr, "Failed to write the qrow map data to %s\n", bqrows->map_file);
 			ret = -1;
 			goto end;
 		}
-		bqrows->bitmap_is_dirty = 0;
-		ret = bdrv_truncate(bqrows->qrow_btmp, bqrows->bitmap_size + bqrows->vm_state_size);
-		if(qrow_check_bitmap(bqrows)) {
-			bqrows->complete_image = 1;
-		}
+		bqrows->map_is_dirty = 0;
+		// bdrv_pwrite是按sector写入，文件不是整sector的话需要截断
+		ret = bdrv_truncate(bqrows->qrow_map_file, sizeof(bqrows->map));
+		
 	}
-	if(bqrows->vmstate_is_saved) {
-		bqrows->vmstate_is_saved = 0;
-		ret = bdrv_truncate(bqrows->qrow_btmp, bqrows->bitmap_size + bqrows->vm_state_size);
-	}
-
+	
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_update_btmp()return %d" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_update_map_file()return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
 
-static int qrow_update_meta(BDRVqrowState *bqrows, const char *current_btmp, int change_copy_on_demand_state) {
-	// 更新磁盘上的snapshot信息，以及当前btmp文件指针
-	// 注意，如果不想current_btmp需要带入NULL，如果带入空字符串将会把磁盘上的相应位置清空
-	int i,  ret = 0;
-	uint32_t copy_on_demand;
-	qrowMeta meta;
-	qrowSnapshotHeader snap_header;
-	qrowSnapshot *snap_ptr;
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_update_meta()\n");
-	printf("snapshots_is_dirty: %d, change_copy_on_demand_state %d\n", bqrows->snapshots_is_dirty, change_copy_on_demand_state);
-#endif
-	if(change_copy_on_demand_state == 0 && bqrows->snapshots_is_dirty == 0 && current_btmp == NULL)
-		goto end;
-
-	if(bdrv_pread (bqrows->qrow_meta, 0, &meta, sizeof(meta)) != sizeof(meta)) {
-			fprintf (stderr, "Failed to read the meta data from %s\n", bqrows->meta_file);
+static int qrow_update_img_file(BDRVqrowState *bqrows) {
+	QRowMeta meta;
+	if(bdrv_pread (bqrows->qrow_img_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
+			fprintf (stderr, "Failed to read the meta data from %s\n", bqrows->qrow_img_file);
 			ret = -1;
 			goto end;
 	}
-	if(change_copy_on_demand_state) {
-		copy_on_demand = meta.copy_on_demand;
-		be32_to_cpus(&copy_on_demand);
-		copy_on_demand = copy_on_demand ? 0 : 1;
-		meta.copy_on_demand = cpu_to_be32(copy_on_demand);
-	}
-	if(current_btmp != NULL) {
-		memset(meta.current_btmp, 0, MAX_FILE_NAME_LENGTH);
-		strncpy(meta.current_btmp, current_btmp, MAX_FILE_NAME_LENGTH);
-	}
-
-	if(bqrows->snapshots_is_dirty) { // 需要更新meta中的snapshot信息
-		meta.nb_snapshots = cpu_to_be32(bqrows->nb_snapshots);
-		for(i = 0; i < bqrows->nb_snapshots; i++) {
-			memset(&snap_header, 0, sizeof(snap_header));
-			snap_ptr = bqrows->snapshots + i;
-			snap_header.snap_magic = cpu_to_be32(qrow_SNAPHEADER_MAGIC);
-			snap_header.date_sec = snap_ptr->date_sec;
-			snap_header.date_nsec = snap_ptr->date_nsec;
-			snap_header.vm_clock_nsec = snap_ptr->vm_clock_nsec;
-			snap_header.vm_state_size = snap_ptr->vm_state_size;
-			snap_header.nb_children = snap_ptr->nb_children;
-			snap_header.is_deleted = snap_ptr->is_deleted;
-			if(snap_ptr->id_str != NULL)
-				strncpy(snap_header.id_str, snap_ptr->id_str, 128);
-			if(snap_ptr->name != NULL)
-				strncpy(snap_header.name, snap_ptr->name, 256);
-			if(snap_ptr->btmp_file == NULL) {
-				fprintf(stderr, "Void btmp filename\n");
-				ret = -1;
-				goto end;
-			}
-			strncpy(snap_header.btmp_file, snap_ptr->btmp_file, MAX_FILE_NAME_LENGTH);
-			if(snap_ptr->irvd_file == NULL) {
-				fprintf(stderr, "Void irvd filename\n");
-				ret = -1;
-				goto end;
-			}
-			strncpy(snap_header.irvd_file, snap_ptr->irvd_file, MAX_FILE_NAME_LENGTH);
-			if(snap_ptr->father_btmp_file != NULL)
-				strncpy(snap_header.father_btmp_file, snap_ptr->father_btmp_file, MAX_FILE_NAME_LENGTH);
-
-			if(bdrv_pwrite(bqrows->qrow_meta, sizeof(meta) + i * sizeof(qrowSnapshotHeader), &snap_header, sizeof(snap_header)) != sizeof(snap_header)) {
-				fprintf (stderr, "Failed to write the snapshot #%d info to %s\n", i, bqrows->meta_file);
-				ret = -1;
-				goto end;
-			}
-		}
-		bqrows->snapshots_is_dirty = 0;
-	}
-
-	if(bdrv_pwrite(bqrows->qrow_meta, 0, &meta, sizeof(meta)) != sizeof(meta)) {
-		fprintf (stderr, "Failed to write the meta data to %s\n", bqrows->meta_file);
+	meta.cluster_offset = cpu_to_be64(bqrows->cluster_offset);
+	if(bdrv_pwrite(bqrows->qrow_img_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
+		fprintf (stderr, "Failed to write the meta data to %s\n", bqrows->img_file);
 		ret = -1;
 		goto end;
 	}
 
-	// bdrv_pwrite是按sector写入，因为meta文件不是整sector的所以需要截断
-	ret = bdrv_truncate(bqrows->qrow_meta, sizeof(meta) + (bqrows->nb_snapshots) * sizeof(qrowSnapshotHeader)); // 截断文件尾部多余的数据
-
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_update_meta()return %d" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_update_meta()return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
@@ -350,7 +279,7 @@ end:
 static void qrow_free_bqrows_cache(BDRVqrowState *bqrows) {
 	int i;
 	if(bqrows_cache != NULL) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 		printf("free bqrows_cache\n");
 #endif
 		for(i = 0; i < bqrows->nb_snapshots; i++) {
@@ -363,49 +292,64 @@ static void qrow_free_bqrows_cache(BDRVqrowState *bqrows) {
 	}
 }
 
+
 static void qrow_close(BlockDriverState *bs) {
 
-	BDRVqrowState *s = bs->opaque;
+	BDRVQrowState *s = bs->opaque;
 
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_close\n");
 #endif
-	/*
-	if(s->log_file_fd != -1)
-	{
-		close(s->log_file_fd);
+	
+	if(s->img_file) {
+#ifdef QROW_DEBUG
+		printf("free img_file (%s)\n", s->img_file);
+#endif
+		qemu_free(s->img_file);
+		s->img_file = NULL;
 	}
-	*/
-		//将map数组写入map文件中
-		lseek(s->map_file_fd, 0, SEEK_SET);//将读写位置移动到文件开头处 
-		if(write(s->map_file_fd, s->map_file, sizeof(s->map_file)) != sizeof(s->map_file)) 
-		{
-			fprintf (stderr, "Failed to write s->map_file \n");
-			return ;
-		}
-		if(s->map_file_fd != -1)
-		{
-			close(s->map_file_fd);
-		}
-			 
-		//更新元数据头信息中的 cluster_offset值 
-		QRowMeta meta;
-		lseek(s->img_file_fd, 0, SEEK_SET);
-		int readBytes = read(s->img_file, &meta, sizeof(meta));
-		if(readBytes != sizeof(meta))
-		{
-			fprintf(stderr,"Can not read meta\n");
-			return;
-		}
-		meta->cluster_offset = cpu_to_be64(s->cluster_offset);    
-		lseek(s->img_file_fd, 0, SEEK_SET);
-		write(s->img_file_fd, &meta, sizeof(meta));
-		if(s->img_file_fd != -1)
-		{
-			close(s->img_file_fd);
-		}
+	if(s->map_file) {
+#ifdef QROW_DEBUG
+		printf("free map_file (%s)\n", s->map_file);
+#endif
+		qemu_free(s->map_file);
+		s->map_file = NULL;
+	}
+/*  log_file
+	if(s->log_file) {
+#ifdef QROW_DEBUG
+		printf("free log_file (%s)\n", s->log_file);
+#endif
+		qemu_free(s->log_file);
+		s->log_file = NULL;
+	}
+*/
+	if(s->qrow_img_file) {
+#ifdef QROW_DEBUG
+		printf("delete qrow_img_file\n");
+#endif
+		bdrv_delete(s->qrow_img_file);
+		s->qrow_img_file = NULL;
+	}
+	if(s->qrow_map_file) {
+#ifdef QROW_DEBUG
+		printf("delete qrow_map_file\n");
+#endif
+		bdrv_delete(s->qrow_map_file);
+		s->qrow_map_file = NULL;
+	}
+	
+/*
+	if(s->qrow_log_file) {
+#ifdef QROW_DEBUG
+		printf("delete qrow_log_file\n");
+#endif
+		bdrv_delete(s->qrow_log_file);
+		s->qrow_log_file = NULL;
+	}
+*/
 
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("qrow_close() return" QROW_DEBUG_END_STR);
 #endif
 }
@@ -484,72 +428,66 @@ end:
 	return ret;
 }
 
-static int qrow_open(BlockDriverState *bs, const char *filename, int flags) {
-    BDRVQrowState *s = bs->opaque;
+static int qrow_open_map_file(BDRVIrowState *bqrows, int flags) {
 
-    int snap_index;
-
-#ifdef qrow_DEBUG
-	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open()\n");
-	printf("filename: %s, flags: %d\n", filename, flags);
+	int ret = 0;
+#ifdef IROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_map_file()\n");
 #endif
-#ifdef qrow_DEBUG_OPEN
-	printf("press Enter to continue...\n");
-	getchar();
+	// 打开map_file文件
+	if(bqrows->map_file == NULL || bqrows->map_file[0] == '\0') {
+		fprintf (stderr, "Void btmp file name\n");
+		ret = -1;
+		goto end;
+	}
+	bqrows->qrow_map_file = bdrv_new ("");
+	ret = bdrv_file_open(&bqrows->qrow_map_file, bqrows->map_file, flags);
+	if (ret < 0) {
+		ret = -1;
+		goto end;
+	}
+	if(bdrv_pread(bqrows->qrow_map_file, 0, bqrows->map, sizeof(bqrows->map)) != sizeof(bqrows->map)) {
+		fprintf(stderr, "Failed to read map_file from %s\n", bqrows->map_file);
+		ret = -1;
+		goto end;
+	}
+	bqrows->map_is_dirty = 0;
+	ret = 0;	
+end:
+#ifdef IROW_DEBUG
+	printf("qrow_open_map_file() return %d" QROW_DEBUG_END_STR, ret);
 #endif
-
-	s->open_flags = flags;
-	
-	//读取元数据信息  
+	return ret;
+}
+static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const char *filename, int flags) {
 	int ret = 0;
 	QRowMeta meta;
-	int fd,log_file_fd, map_file_fd;
-	fd = open(filename, O_RDWR|O_BINARY, 0777);//打开磁盘文件
-	if (fd < 0) 
-	{
+
+
+#ifdef IROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_img_file()\n");
+#endif
+
+	bqrows->qrow_img_file = bdrv_new ("");
+	//用raw的方式打开镜像文件的话，最终调用的就是qemu_open() 里面正常的open()
+	ret = bdrv_file_open(&bqrows->qrow_img_file, filename, flags);
+	if (ret < 0) {
 		fprintf (stderr, "Failed to open %s\n", filename);
-		goto fail;
+		goto end;
 	}
-	uint64_t cur_disk_size = lseek(fd, 0, SEEK_END);//先获取文件大小
-	lseek(fd, 0, SEEK_SET);//将读写位置移动到文件开头处 
-	int readBytes = read(fd, &meta, sizeof(meta));
-	if(readBytes != sizeof(meta))
-	{
-		fprintf (stderr, "Failed to read QRowMeta \n");
-    	goto fail;
+	if (bdrv_pread (bqrows->qrow_img_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
+		fprintf (stderr, "Failed to read the QROW meta data from %s\n", filename);
+		ret = -1;
+		goto end;
 	}
-	
-	map_file_fd = open(meta.map_file, O_RDWR|O_CREAT|O_BINARY,0333);//创建或者打开map文件
-	if (map_file_fd < 0) 
-	{
-		printf("Can not open %s\n", meta.map_file);
-		goto fail;
-	}
-	uint64_t map_file_size = lseek(map_file_fd, 0, SEEK_END);
-	//先获取map文件大小，如果为0，则证明还没有将map数组写入文件，是第一次代开map文件，否则，将map文件中的map数组读取出来，并赋值给qrow_state->map 
-	lseek(map_file_fd, 0, SEEK_SET);//将读写位置移动到文件开头处 
-	if(map_file_size > 0) 
-	{
-		if(read(map_file_fd, s->map_file, sizeof(s->map_file)) != sizeof(s->map_file))	
-		{
-			printf("Can not read map_file correctly %s\n", meta.map_file);
-			goto fail;
-		}
-	}
-	else
-	{
-		s->map_file[MAX_VM_SECTOR_NUM] = {0};
-	}
-	
 	be32_to_cpus(&meta.magic);
 	be32_to_cpus(&meta.version);
 	be32_to_cpus(&meta.cluster_size);
 	be32_to_cpus(&meta.cluster_bits);
-	be64_to_cpus(&meta.total_clusters);
 	be32_to_cpus(&meta.sectors_per_cluster);
+	be64_to_cpus(&meta.total_clusters);
 	be64_to_cpus(&meta.disk_size);
 	be64_to_cpus(&meta.cluster_offset);
-	
 #ifdef IROW_DEBUG_DETAIL
 	printf("meta.magic: %x\n", meta.magic);
 	printf("meta.version: %x\n", meta.version);
@@ -563,55 +501,139 @@ static int qrow_open(BlockDriverState *bs, const char *filename, int flags) {
 
 	if(meta.magic != IROW_MAGIC || meta.version != IROW_VERSION) {
 		fprintf (stderr, "Invalid magic number or version number!\n");
-		goto fail;
+		ret = -1;
+		goto end;
 	}
 	// 判断cluster大小是否合法
 	if((meta.cluster_bits < MIN_CLUSTER_BITS) || (meta.cluster_bits > MAX_CLUSTER_BITS)) {
 		fprintf (stderr, "Invalid cluster_bits!\n");
-		goto fail;
+		ret = -1;
+		goto end;
 	}
 	// 判断cluster_size和cluster_bits是否匹配
 	if(meta.cluster_bits != get_bits_from_size(meta.cluster_size)) {
 		fprintf (stderr, "cluster_size and cluster_bits do not match!\n");
-		goto fail;
+		ret = -1;
+		goto end;
 	}
 	// 判断total_clusters和disk_size是否匹配
 	if(meta.total_clusters != ((meta.disk_size + meta.cluster_size - 1) >> meta.cluster_bits)) {
 		fprintf (stderr, "total_clusters and disk_size do not match!\n");
-		goto fail;
+		ret = -1;
+		goto end;
 	}
 	// 判断sectors_per_cluster是否合法
 	if(meta.sectors_per_cluster != (meta.cluster_size >> BDRV_SECTOR_BITS)) {
 		fprintf (stderr, "Invalid sectors_per_cluster!\n");
-		goto fail;
+		ret = -1;
+		goto end;
 	}
-	map_file_fd = open(meta.map_file, O_RDWR|O_CREAT|O_BINARY,0777);//创建或者打开map文件
-	if (map_file_fd < 0) 
+	bqrows->cluster_size = meta.cluster_size;
+	bqrows->cluster_bits = meta.cluster_bits;
+	bqrows->total_clusters = meta.total_clusters;
+	bqrows->sectors_per_cluster = meta.sectors_per_cluster;
+	bqrows->disk_size = meta.disk_size;
+	bs->total_sectors = meta.disk_size / BDRV_SECTOR_SIZE;
+	/* //没办法使用lseek这个函数
+	int fd = open(filename, O_RDWR|O_BINARY, 0333);//打开磁盘文件
+	if (fd < 0) 
 	{
-		fprintf (stderr, "Can not open %s\n", meta.map_file);
-		goto fail;
+		printf("Can not open %s\n", filename);
+		return 0;
 	}
-	
-	
-	s->cluster_size = meta.cluster_size;
-	s->total_clusters = meta.total_clusters;
-	s->sectors_per_cluster = meta.sectors_per_cluster;
+	uint64_t cur_disk_size = lseek(fd, 0, SEEK_END);//先获取文件大小
+	lseek(fd, 0, SEEK_SET);//将读写位置移动到文件开头处 
 	uint64_t cur_cluster_offset = (cur_disk_size % s->cluster_size == 0) ? (cur_disk_size / s->cluster_size) : (cur_disk_size / s->cluster_size+1);
 	s->cluster_offset = (s->cluster_offset < cur_cluster_offset) ? cur_cluster_offset : s->cluster_offset;
-	s->byte_offset = s->cluster_offset * s->cluster_size;
-	s->sector_offset = s->cluster_offset * s->sectors_per_cluster;
-	s->img_file_fd = fd; 
-	s->map_file_fd = map_file_fd;
-	//注意这里
-	s->log_file_fd = -1; 
-	    	
+	*/
+	bqrows->cluster_offset = meta.cluster_offset；
+	bqrows->byte_offset = bqrows->cluster_offset * bqrows->cluster_size;
+	bqrows->sector_offset = bqrows->cluster_offset * bqrows->sectors_per_cluster;
+	bqrows->meta_cluster = if(sizeof(meta) % meta.cluster_size == 0 )? (sizeof(meta) / meta.cluster_size): (sizeof(meta) / meta.cluster_size + 1);
+	bqrows->img_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
+	strncpy(bqrows->img_file, filename, MAX_FILE_NAME_LENGTH);
+	bqrows->map_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
+	strncpy(bqrows->map_file, meta.map_file, MAX_FILE_NAME_LENGTH);
+	strncpy(bs->backing_file, meta.backing_file, sizeof(bs->backing_file));
+	//log_file还没处理的，
+	
+#ifdef IROW_DEBUG
+	printf("backing_file \"%s\"\n", bs->backing_file);
 #endif
+
+	/*还要借鉴cluster_cache
+	if(cluster_cache == NULL) {
+		cluster_cache = qemu_mallocz(sizeof(ClusterCache));
+		if(cluster_cache != NULL) {
+			cluster_cache->cache = qemu_memalign(512, birows->cluster_size);
+			if(cluster_cache->cache != NULL)
+				memset(cluster_cache->cache, 0, birows->cluster_size);
+			else {
+				fprintf(stderr, "Failed to create father cache\n");
+				ret = -1;
+				goto end;
+			}
+			cluster_cache->cluster_num = -1;
+		} else {
+			fprintf(stderr, "Failed to create father cache\n");
+			ret = -1;
+			goto end;
+		}
+	}
+	
+#ifdef IROW_DEBUG
+	printf("cluster_cache %p, cluster_cache->cache %p\n", cluster_cache, cluster_cache->cache);
+#endif
+*/
+end:
+#ifdef IROW_DEBUG
+	printf("qrow_open_img_file() return %d" QROW_DEBUG_END_STR, ret);
+#endif
+	return ret;
+}
+static int qrow_open(BlockDriverState *bs, const char *filename, int flags) {
+    BDRVQrowState *s = bs->opaque;
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open()\n");
+	printf("filename: %s, flags: %d\n", filename, flags);
+#endif
+#ifdef QROW_DEBUG_OPEN
+	printf("press Enter to continue...\n");
+	getchar();
+#endif
+
+	s->open_flags = flags;
+	
+	//打开img_file，获取元数据信息
+	if(qrow_open_img_file(bs, s, filename, flags) < 0) {
+    	fprintf (stderr, "Failed to open %s\n", filename);
+    	goto fail;
+    }
+	
+	// 再打开map_file文件
+    if(qrow_open_map_file(s, flags) < 0) {
+    	goto fail;
+    }
+	/*
+	if(irow_init_birows_cache(s) < 0) {
+    	fprintf (stderr, "Failed to create birows_cache\n");
+    	goto fail;
+	}
+#ifdef IROW_DEBUG
+#ifdef IROW_DEBUG_DETAIL
+    dump_mem(s, sizeof(BDRVIrowState), "BDRVIrowState after irow_open_vd");
+    dump_BDRVIrowState(s);
+
+    dump_birows_cache(s);
+#endif
+	*/
+#ifdef QROW_DEBUG 
     printf("qrow_open return 0" QROW_DEBUG_END_STR);
 #endif
     return 0;
 
 fail:
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG 
 	printf("qrow_open return -1" QROW_DEBUG_END_STR);
 #endif
 	qrow_close (bs);
@@ -637,8 +659,8 @@ static void qrow_set_bit(BDRVqrowState *bqrows, int64_t cluster_index) {
 
 	byte_index = cluster_index >> 3;
 	bit_index = cluster_index & 0x7;
-#ifdef qrow_DEBUG_DETAIL
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_set_bit()\n");
+#ifdef QROW_DEBUG_DETAIL
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_set_bit()\n");
 	printf("cluster_index %" PRId64 ", byte_index %" PRId64 ", bit_index %" PRId64 "\n", cluster_index, byte_index, bit_index);
 	printf("byte before set bit 0x%02x\n", bqrows->bitmap[byte_index]);
 #endif
@@ -647,10 +669,10 @@ static void qrow_set_bit(BDRVqrowState *bqrows, int64_t cluster_index) {
 		bqrows->bitmap[byte_index] |= (1 <<  bit_index);
 		bqrows->bitmap_is_dirty = 1;
 	}
-#ifdef qrow_DEBUG_DETAIL
-	printf("byte after set bit 0x%02x" qrow_DEBUG_END_STR, bqrows->bitmap[byte_index]);
+#ifdef QROW_DEBUG_DETAIL
+	printf("byte after set bit 0x%02x" QROW_DEBUG_END_STR, bqrows->bitmap[byte_index]);
 #endif
-#ifdef qrow_DEBUG_SET_BIT
+#ifdef QROW_DEBUG_SET_BIT
 	if(cluster_index <= 256) {
 	printf("press Enter to continue...");
 	getchar();
@@ -658,6 +680,8 @@ static void qrow_set_bit(BDRVqrowState *bqrows, int64_t cluster_index) {
 #endif
 
 }
+
+
 
 static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqrows, int64_t start_cluster, int64_t nb_clusters, uint8_t *buf, uint8_t *buf_bitmap, uint64_t buf_start) {
 	// 判断cluster_index对应的cluster是否存在于当前的磁盘镜像中，如果不在，就递归的从father镜像中读取到buf［buf_index］中
@@ -668,25 +692,25 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 	int snap_index, ret = 0;
 	BlockDriver *drv;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_read_missing_clusters2()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_read_missing_clusters2()\n");
 	printf("start_cluster %" PRId64 ", nb_clusters %" PRId64 ",buf_start %" PRId64 "\n", start_cluster, nb_clusters, buf_start);
 #endif
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	dump_BDRVqrowState(bqrows);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 	printf("press Enter to continue...\n");
 	getchar();
 #endif
 	continuous_missing_clusters = 0;
 	continuous_appearing_clusters = 0;
 	for(i = 0; i < nb_clusters; i++) {
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 		printf("i %" PRId64 ", continuous_missing_clusters %" PRId64 ",continuous_appearing_clusters %" PRId64 "\n",
 				i, continuous_missing_clusters, continuous_appearing_clusters);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 		printf("press Enter to continue...\n");
 		getchar();
 #endif
@@ -697,25 +721,25 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 				if(strcmp(bqrows->current_btmp_file, bqrows->opened_btmp_file) != 0) { // 不在当前文件中才需要读取
 					cluster_index = start_cluster + i - continuous_appearing_clusters;
 					buf_index = buf_start + i - continuous_appearing_clusters;
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("cluster_cache %p, cluster_cache->cache %p\n", cluster_cache, cluster_cache->cache);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 					printf("press Enter to continue...\n");
 					getchar();
 #endif
 					if(cluster_cache != NULL) {
 						if(cluster_cache->cache != NULL) {
 							//这里应该再加上一个判断是否为同一个文件
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 							printf("cluster_index %" PRId64 ", cluster_cache->cluster_num %" PRId64 "\n",
 									cluster_index, cluster_cache->cluster_num);
 #endif
 							if(cluster_index == cluster_cache->cluster_num) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 								printf("copying from cluster_cache\nbuf_index %" PRId64 "\n", buf_index);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 			printf("press Enter to continue...\n");
 			getchar();
 #endif
@@ -730,14 +754,14 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 						}
 					}
 					drv = bqrows->qrow_irvd->drv;
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("reading from father...\n");
 #endif
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 					printf("cluster_index %" PRId64 ", buf_index %" PRId64 ", continuous_appearing_clusters %" PRId64 "\n",
 							cluster_index, buf_index, continuous_appearing_clusters);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 		printf("press Enter to continue...\n");
 		getchar();
 #endif
@@ -749,16 +773,16 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 							ret = -1;
 							goto end;
 						}
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("cluster_cache %p, cluster_cache->cache %p\n", cluster_cache, cluster_cache->cache);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 					printf("press Enter to continue...\n");
 					getchar();
 #endif
 					if(cluster_cache != NULL) {
 						if(cluster_cache->cache != NULL) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 							printf("copying to father cache\n");
 #endif
 							memcpy(cluster_cache->cache, buf + (buf_start + i - 1) * bqrows->cluster_size, bqrows->cluster_size);
@@ -766,7 +790,7 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 						}
 					}
 					} else {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 						printf("cluster(s) in current irvd, do nothing...\n");
 #endif
 				}
@@ -777,7 +801,7 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 			if(continuous_missing_clusters != 0) {
 				if(bqrows->father_btmp_file != NULL) { // 有father快照
 					snap_index = qrow_find_snapshot_by_btmp(bqrows, bqrows->father_btmp_file); // 获得father在快照数组中的索引
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("snap_index %d\n", snap_index);
 #endif
 					if(bqrows_cache[snap_index] == NULL) {
@@ -787,14 +811,14 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 							goto end;
 						}
 					}
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 					dump_bqrows_cache(bqrows);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 					printf("press Enter to continue...\n");
 					getchar();
 #endif
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("Recursive calling qrow_read_missing_clusters2...\n");
 #endif
 					ret = qrow_read_missing_clusters2(bs,
@@ -811,7 +835,7 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 					    backing_sector_num = (start_cluster + i - continuous_missing_clusters) * bqrows->sectors_per_cluster;
 					    backing_nb_sectors = continuous_missing_clusters * bqrows->sectors_per_cluster;
 					    backing_buf = buf + (buf_start + i - continuous_missing_clusters) * bqrows->cluster_size;
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 						printf("read from base image\n");
 						printf("backing_len %" PRId64 ", backing_sector_num %" PRId64 ", backing_nb_sectors %" PRId64 "\nbuf %p, backing_buf %p\n",
 								backing_len, backing_sector_num, backing_nb_sectors, buf, backing_buf);
@@ -832,19 +856,19 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 			}
 		}
 	}
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("after loop\n");
 	printf("continuous_missing_clusters %ld, continuous_appearing_clusters %ld\n",
 			continuous_missing_clusters, continuous_appearing_clusters);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 			printf("press Enter to continue...\n");
 			getchar();
 #endif
 	if(continuous_missing_clusters != 0) {
 		if(bqrows->father_btmp_file != NULL) {
 			snap_index = qrow_find_snapshot_by_btmp(bqrows, bqrows->father_btmp_file); // 获得father在快照数组中的索引
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 			printf("snap_index %d\n", snap_index);
 #endif
 			if(bqrows_cache[snap_index] == NULL) {
@@ -854,13 +878,13 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 					goto end;
 				}
 			}
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 			dump_bqrows_cache(bqrows);
 #endif
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 			printf("Recursive calling qrow_read_missing_clusters2...\n");
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 			printf("press Enter to continue...\n");
 			getchar();
 #endif
@@ -878,7 +902,7 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 			    backing_sector_num = (start_cluster + i - continuous_missing_clusters) * bqrows->sectors_per_cluster;
 			    backing_nb_sectors = continuous_missing_clusters * bqrows->sectors_per_cluster;
 			    backing_buf = buf + (buf_start + i - continuous_missing_clusters) * bqrows->cluster_size;
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 				printf("read from base image\n");
 				printf("backing_len %" PRId64 ", backing_sector_num %" PRId64 ", backing_nb_sectors %" PRId64 "\nbuf %p, backing_buf %p\n",
 						backing_len, backing_sector_num, backing_nb_sectors, buf, backing_buf);
@@ -902,25 +926,25 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 		if(strcmp(bqrows->current_btmp_file, bqrows->opened_btmp_file) != 0) { // 不在当前文件中才需要读取
 			cluster_index = start_cluster + i - continuous_appearing_clusters;
 			buf_index = buf_start + i - continuous_appearing_clusters;
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 			printf("cluster_cache %p, cluster_cache->cache %p\n", cluster_cache, cluster_cache->cache);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 			printf("press Enter to continue...\n");
 			getchar();
 #endif
 			if(cluster_cache != NULL) {
 				if(cluster_cache->cache != NULL) {
 					//这里应该再加上一个判断是否为同一个文件
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("cluster_index %" PRId64 ", cluster_cache->cluster_num %" PRId64 "\n",
 							cluster_index, cluster_cache->cluster_num);
 #endif
 					if(cluster_index == cluster_cache->cluster_num) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 						printf("copying from cluster_cache\n");
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 			printf("press Enter to continue...\n");
 			getchar();
 #endif
@@ -935,14 +959,14 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 				}
 			}
 			drv = bqrows->qrow_irvd->drv;
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 			printf("Reading from father...\n");
 #endif
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 					printf("cluster_index %" PRId64 ", buf_index %" PRId64 ", continuous_appearing_clusters %" PRId64 "\n",
 							cluster_index, buf_index, continuous_appearing_clusters);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 			printf("press Enter to continue...\n");
 			getchar();
 #endif
@@ -953,16 +977,16 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 					fprintf(stderr, "Failed to read clusters from %s\n", bqrows->irvd_file);
 					ret = -1;
 				}
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 			printf("cluster_cache %p, cluster_cache->cache %p\n", cluster_cache, cluster_cache->cache);
 #endif
-#ifdef qrow_DEBUG_READ_MISSING_CLUSTSERS2
+#ifdef QROW_DEBUG_READ_MISSING_CLUSTSERS2
 			printf("press Enter to continue...\n");
 			getchar();
 #endif
 			if(cluster_cache != NULL) {
 				if(cluster_cache->cache != NULL) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("copying to father cache\n");
 #endif
 					memcpy(cluster_cache->cache, buf + (buf_start + i - 1) * bqrows->cluster_size, bqrows->cluster_size);
@@ -970,7 +994,7 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 				}
 			}
 		} else {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 				printf("cluster(s) in current irvd, do nothing...\n");
 	#endif
 		}
@@ -978,8 +1002,8 @@ static int qrow_read_missing_clusters2(BlockDriverState *bs, BDRVqrowState *bqro
 	}
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_read_missing_clusters2() return %d\n" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_read_missing_clusters2() return %d\n" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
@@ -990,10 +1014,10 @@ static int qrow_read_missing_clusters(BlockDriverState *bs, int64_t first_cluste
 	int64_t nb_clusters;
 	int ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_read_missing_clusters()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_read_missing_clusters()\n");
 	printf("first_cluster %" PRId64 ", last_cluster %" PRId64 "\n", first_cluster, last_cluster);
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	dump_BDRVqrowState(bqrows);
 #endif
 #endif
@@ -1026,8 +1050,8 @@ static int qrow_read_missing_clusters(BlockDriverState *bs, int64_t first_cluste
 
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_read_missing_clusters() return %d\n" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_read_missing_clusters() return %d\n" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
@@ -1039,10 +1063,10 @@ end:
 	int ret = 0;
 	BlockDriver *drv;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_read_clusters()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_read_clusters()\n");
 	printf("cluster_index %" PRId64 ", nb_clusters %d\n", cluster_index, nb_clusters);
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	dump_BDRVqrowState(bqrows);
 #endif
 #endif
@@ -1061,8 +1085,8 @@ end:
 	ret = drv->bdrv_read(bqrows->qrow_irvd, bqrows->sectors_per_cluster * cluster_index, buf, bqrows->sectors_per_cluster * nb_clusters);
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_write_clusters() return %d\n" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_write_clusters() return %d\n" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }*/
@@ -1073,10 +1097,10 @@ static int qrow_write_clusters(BDRVqrowState *bqrows, int64_t cluster_index, con
 	int ret = 0;
 	BlockDriver *drv;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_write_clusters()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_write_clusters()\n");
 	printf("cluster_index %" PRId64 ", nb_clusters %d\n", cluster_index, nb_clusters);
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	dump_BDRVqrowState(bqrows);
 #endif
 #endif
@@ -1094,8 +1118,8 @@ static int qrow_write_clusters(BDRVqrowState *bqrows, int64_t cluster_index, con
 	ret = drv->bdrv_write(bqrows->qrow_irvd, bqrows->sectors_per_cluster * cluster_index, buf, bqrows->sectors_per_cluster * nb_clusters);
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_write_clusters() return %d\n" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_write_clusters() return %d\n" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
@@ -1114,11 +1138,11 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 	uint8_t *buffer_offset;// *zero_buf = NULL;
 	int ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_assert_clusters()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_assert_clusters()\n");
 	printf("sector_num %" PRId64 ", nb_sectors %d, op_type %d\n", sector_num, nb_sectors, op_type);
 #endif
-#ifdef qrow_DEBUG_ASSERT_CLUSTERS
+#ifdef QROW_DEBUG_ASSERT_CLUSTERS
 	printf("press Enter to continue...");
 	getchar();
 #endif
@@ -1128,7 +1152,7 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 	nb_clusters = last_cluster - first_cluster + 1;
 	//zero_buf = qemu_mallocz(bqrows->cluster_size);
 
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("first_cluster %" PRId64 ", last_cluster %" PRId64 "\n", first_cluster, last_cluster);
 #endif
 
@@ -1142,7 +1166,7 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 
 		if(bqrows->copy_on_demand) {
 			// 写入连续的若干个cluster
-	#ifdef qrow_DEBUG_DETAIL
+	#ifdef QROW_DEBUG_DETAIL
 			printf("%" PRId64 ": ", nb_clusters);
 			for(i = 0; i <  nb_clusters + 1; i++) {
 				printf("%d ", cbuf->read_from_father[i]);
@@ -1151,22 +1175,22 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 	#endif
 			continuous_cluster = 0;
 			for(i = 0; i < nb_clusters + 1; i++) {
-	#ifdef qrow_DEBUG_DETAIL
+	#ifdef QROW_DEBUG_DETAIL
 				printf("i %" PRId64 ", continuous_cluster %" PRId64 "\n", i, continuous_cluster);
 	#endif
 				if(cbuf->read_from_father[i] == 0) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("read_from_father[%ld] is 0\n", i);
 #endif
 					if(continuous_cluster == 0)
 						continue;
 					cluster_offset = first_cluster + i - continuous_cluster;
 					buffer_offset = cbuf->buf + (i - continuous_cluster) * bqrows->cluster_size;
-	#ifdef qrow_DEBUG_DETAIL
+	#ifdef QROW_DEBUG_DETAIL
 					printf("copying data\n");
 					printf("cluster_offset %" PRId64 ", buf %p, buffer_offset %p\n", cluster_offset, cbuf->buf, buffer_offset);
 	#endif
-	#ifdef qrow_DEBUG_ASSERT_CLUSTERS
+	#ifdef QROW_DEBUG_ASSERT_CLUSTERS
 					printf("press Enter to continue...");
 					getchar();
 	#endif
@@ -1175,30 +1199,30 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 						goto end;
 					}
 					continuous_cluster = 0;
-	#ifdef qrow_DEBUG_ASSERT_CLUSTERS
+	#ifdef QROW_DEBUG_ASSERT_CLUSTERS
 					printf("press Enter to continue...");
 					getchar();
 	#endif
 				} else {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("read_from_father[%ld] is 1\n", i);
 #endif
-	#ifdef qrow_DEBUG_ASSERT_CLUSTERS
+	#ifdef QROW_DEBUG_ASSERT_CLUSTERS
 					printf("press Enter to continue...");
 					getchar();
 	#endif
 					/*if(memcmp(zero_buf, cbuf->buf + i * bqrows->cluster_size, bqrows->cluster_size) == 0) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("cluster data is all zeros\n");
 #endif
 						if(continuous_cluster != 0) {
 							cluster_offset = first_cluster + i - continuous_cluster;
 							buffer_offset = cbuf->buf + (i - continuous_cluster) * bqrows->cluster_size;
-			#ifdef qrow_DEBUG_DETAIL
+			#ifdef QROW_DEBUG_DETAIL
 							printf("copying data\n");
 							printf("cluster_offset %" PRId64 ", buf %p, buffer_offset %p\n", cluster_offset, cbuf->buf, buffer_offset);
 			#endif
-			#ifdef qrow_DEBUG_ASSERT_CLUSTERS
+			#ifdef QROW_DEBUG_ASSERT_CLUSTERS
 							printf("press Enter to continue...");
 							getchar();
 			#endif
@@ -1207,7 +1231,7 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 								goto end;
 							}
 							continuous_cluster = 0;
-			#ifdef qrow_DEBUG_ASSERT_CLUSTERS
+			#ifdef QROW_DEBUG_ASSERT_CLUSTERS
 							printf("press Enter to continue...");
 							getchar();
 			#endif
@@ -1217,7 +1241,7 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 					}*/
 					continuous_cluster += 1;
 					qrow_set_bit(bqrows, first_cluster + i);
-	#ifdef qrow_DEBUG_ASSERT_CLUSTERS
+	#ifdef QROW_DEBUG_ASSERT_CLUSTERS
 					printf("press Enter to continue...");
 					getchar();
 	#endif
@@ -1229,12 +1253,12 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 	case qrow_AIO_WRITE:
 		if(sector_num == first_sector_in_cluster(bqrows, first_cluster)) { // 写入起点对齐到cluster起点
 			if((sector_num + nb_sectors - 1) == last_sector_in_cluster(bqrows, last_cluster)) { // 写入终点对齐到cluster终点
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 				printf("write whole clusters, do nothing.\n");
 #endif
 				break; // 写入的是整cluster因此什么也不需要做
 			} else { // 写入终点未对齐到cluster终点
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 				printf("assert last cluster.\n");
 #endif
 				// 此时，只可能是last_cluster不是一个完整的cluster（无论first_cluster是否与last_cluster相同）
@@ -1243,10 +1267,10 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 					goto end;
 				}
 				if(cbuf->read_from_father[0] == 1) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("last cluster is read from father\n");
 #endif
-#ifdef qrow_DEBUG_WRITE
+#ifdef QROW_DEBUG_WRITE
 					dump_mem(cbuf->buf, bqrows->cluster_size, "last cluster");
 					printf("press Enter to continue...");
 					getchar();
@@ -1261,7 +1285,7 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 			}
 		} else { // 写入起点未对齐到cluster起点
 			if((sector_num + nb_sectors - 1) == last_sector_in_cluster(bqrows, last_cluster)) { // 写入终点对齐到cluster终点
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 				printf("assert first cluster.\n");
 #endif
 				// 此时，只可能是first_cluster不是一个完整的cluster（无论first_cluster是否于last_cluster相同）
@@ -1270,10 +1294,10 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 					goto end;
 				}
 				if(cbuf->read_from_father[0] == 1) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("first cluster is read from father\n");
 #endif
-#ifdef qrow_DEBUG_WRITE
+#ifdef QROW_DEBUG_WRITE
 					dump_mem(cbuf->buf, bqrows->cluster_size, "first cluster");
 					printf("press Enter to continue...");
 					getchar();
@@ -1286,7 +1310,7 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 				}
 				break;
 			} else { // 写入终点未对齐到cluster终点
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 				printf("assert first & last cluster.\n");
 #endif
 				// 此时,first_cluster和last_cluster都有可能是不完整的cluster
@@ -1295,10 +1319,10 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 					goto end;
 				}
 				if(cbuf->read_from_father[0] == 1) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("first cluster is read from father\n");
 #endif
-#ifdef qrow_DEBUG_WRITE
+#ifdef QROW_DEBUG_WRITE
 					dump_mem(cbuf->buf, bqrows->cluster_size, "first cluster");
 					printf("press Enter to continue...");
 					getchar();
@@ -1310,10 +1334,10 @@ static int qrow_assert_clusters(BlockDriverState *bs, ClusterBuffer *cbuf, int64
 					qrow_set_bit(bqrows, first_cluster);
 				}
 				if(cbuf->read_from_father[1] == 1) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 					printf("last cluster is read from father\n");
 #endif
-#ifdef qrow_DEBUG_WRITE
+#ifdef QROW_DEBUG_WRITE
 					dump_mem(cbuf->buf + bqrows->cluster_size, bqrows->cluster_size, "last cluster");
 					printf("press Enter to continue...");
 					getchar();
@@ -1336,277 +1360,93 @@ end:
 		printf("stub 2\n");
 		zero_buf = NULL;
 	}*/
-#ifdef qrow_DEBUG
-	printf("qrow_assert_clusters() return %d\n" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_assert_clusters() return %d\n" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
 
 static int qrow_read(BlockDriverState *bs, int64_t sector_num, uint8_t *buf, int nb_sectors) {
 
-	BDRVqrowState *s = bs->opaque;
-	int64_t first_cluster, last_cluster, nb_clusters, sector_index, cluster_index, buf_offset, temp_buf_offset, temp_buf_index;
-	int first_cluster_copied = 0;
-	BlockDriver *drv;
-	ClusterBuffer cbuf;
-	int remain_sectors, cbuf_offset, len, ret = 0;
-	uint8_t *temp_buf = NULL;
-
-	first_cluster = sector_num / s->sectors_per_cluster;
-	last_cluster = (sector_num + nb_sectors - 1) / s->sectors_per_cluster;
-	nb_clusters = last_cluster - first_cluster + 1;
-	temp_buf_offset = (sector_num & (s->sectors_per_cluster - 1)) * BDRV_SECTOR_SIZE;
-	temp_buf_index = 0;
-	cbuf.buf = NULL;
-	cbuf.read_from_father = NULL;
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_read()\n");
-	printf("sector_num: %" PRId64 "\n", sector_num);
-	printf("nb_sectors: %d\n", nb_sectors);
-	printf("sectors_per_cluster: %d\n", s->sectors_per_cluster);
-	printf("first_cluster: %" PRId64 "\n", first_cluster);
-	printf("last_cluster: %" PRId64 "\n", last_cluster);
-#endif
-
-	if(first_cluster >= s->total_clusters) { // 起始的cluster超过允许最大范围
-		fprintf (stderr, "Invalid sector_num.\n");
-		ret = -1;
-		goto end;
-	}
-	if(last_cluster >= s->total_clusters) { // 结束cluster超过允许最大范围
-		fprintf (stderr, "Invalid nb_sectors.\n");
-		ret = -1;
-		goto end;
-	}
-
-	// 无论cluster是否存在于当前镜像中，都先将其读取，后面再将不在镜像中的数据填充进来
-	temp_buf = qemu_memalign(512, nb_clusters * s->cluster_size);
-	memset(temp_buf, 0, nb_clusters * s->cluster_size);
-	if(temp_buf == NULL) {
-		fprintf (stderr, "Failed to create temp_buf.\n");
-		ret = -1;
-		goto end;
-	}
-	if(cluster_cache != NULL) {
-		if(cluster_cache->cache != NULL) {
-			if(first_cluster == cluster_cache->cluster_num) {
-#ifdef qrow_DEBUG
-			printf("copying from cluster_cache\n");
-#endif
-				memcpy(temp_buf, cluster_cache->cache, s->cluster_size);
-				first_cluster_copied = 1;
-				first_cluster += 1;
-				nb_clusters -= 1;
-				temp_buf_index += 1;
-			}
-		}
-	}
-#ifdef qrow_DEBUG
-	printf("nb_clusters: %" PRId64 "\n", nb_clusters);
-#endif
-#ifdef qrow_DEBUG_READ
-	printf("Press Enter to continue...\n");
-	getchar();
-#endif
-
-	if(nb_clusters != 0) {
-#ifdef qrow_DEBUG
-			printf("read from image file\n");
-#endif
-		drv = s->qrow_irvd->drv;
-		ret = drv->bdrv_read(s->qrow_irvd, first_cluster * s->sectors_per_cluster, temp_buf + temp_buf_index * s->cluster_size,  nb_clusters * s->sectors_per_cluster);
-		if(ret < 0) {
-			goto end;
-		}
-	}
-
-	memcpy(buf, temp_buf + temp_buf_offset, nb_sectors * BDRV_SECTOR_SIZE);
-
-	if(first_cluster_copied) {
-		first_cluster -= 1;
-		nb_clusters += 1;
-	}
-	if(nb_clusters != 0) {
-		if(cluster_cache != NULL) {
-			if(cluster_cache->cache != NULL) {
-				if(qrow_get_bit(s, last_cluster)) {
-#ifdef qrow_DEBUG
-			printf("copying to cluster_cache\n");
-#endif
-				memcpy(cluster_cache->cache, temp_buf + (nb_clusters - 1) * s->cluster_size, s->cluster_size);
-				cluster_cache->cluster_num = last_cluster;
-				}
-			}
-		}
-
-#ifdef qrow_DEBUG
-		printf("\nfather_btmp_file %s\n", s->father_btmp_file);
-		printf("complete_image %d\n\n", s->complete_image);
-#endif
-#ifdef qrow_DEBUG_READ
-				printf("Press Enter to continue...\n");
-				getchar();
-#endif
-		if(s->complete_image != 1) {
-			// 镜像不完整
-			cbuf.buf = qemu_memalign(512, nb_clusters * s->cluster_size); // 用于存储从father读取的数据
-			memset(cbuf.buf, 0, nb_clusters * s->cluster_size);
-			cbuf.read_from_father = qemu_mallocz(nb_clusters  + 1); //用于表示buf中哪个cluster是从father中读取的，最后多余的一个空间是用于后面判断连续cluster长度
-			// 读取不再当前镜像中的cluster到cbuf中
-			if(qrow_assert_clusters(bs, &cbuf, first_sector_in_cluster(s, first_cluster), nb_clusters * s->sectors_per_cluster, qrow_READ) < 0) {
-				fprintf (stderr, "qrow_assert_clusters() failed.\n");
+	BDRVQrowState *s = bs->opaque;
+	uint64_t sector_offset;
+	
+	for (int64_t i = sector_num, j = 0; i < (nb_sectors+sector_num); i++) 
+	{
+		sector_offset = s->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
+		//s->map[i]为0时，要么是表示磁盘镜像的meta元数据占据的第一个sector，要么表示该虚拟扇区的数据为空
+		if(sector_offset < (s->meta_cluster*s->sectors_per_cluster)) //该磁盘内容为空(0)或者为header部分
+		{
+			continue; 
+		} 
+		else
+		{
+		 	if(bdrv_pread(s->qrow_img_file, sector_offset*BDRV_SECTOR_SIZE, buf+j*BDRV_SECTOR_SIZE, BDRV_SECTOR_SIZE) != BDRV_SECTOR_SIZE) {
+				fprintf (stderr, "Failed to read the  data from %s\n", s->img_file);
 				ret = -1;
 				goto end;
 			}
-			// 更新btmp
-			qrow_update_btmp(s);
-
-#ifdef qrow_DEBUG_DETAIL
-			int64_t i;
-			remain_sectors = nb_sectors;
-			printf("read_from_father[]: ");
-			for(i = 0; i < nb_clusters; i++) {
-				printf("%d, ", cbuf.read_from_father[i]);
-			}
-			printf("\n");
-#endif
-
-			sector_index = sector_num;
-			remain_sectors = nb_sectors;
-			buf_offset = 0;
-#ifdef qrow_DEBUG_READ
-			dump_mem(buf, nb_sectors * BDRV_SECTOR_SIZE, "read buffer before cbuf copy");
-#endif
-			while(remain_sectors > 0) {
-				cluster_index = sector_index / s->sectors_per_cluster;
-				len = last_sector_in_cluster(s, cluster_index) - sector_index + 1;
-				if(len > remain_sectors)
-					len = remain_sectors;
-#ifdef qrow_DEBUG_DETAIL
-				printf("sector_index %" PRId64 ", cluster_index %" PRId64 ", first_cluster %" PRId64 ", buf_offset %" PRId64 ", len %d\n", sector_index, cluster_index, first_cluster, buf_offset, len);
-#endif
-#ifdef qrow_DEBUG_READ
-				printf("read_from_father %d\n", cbuf.read_from_father[cluster_index - first_cluster]);
-				printf("Press Enter to continue...\n");
-				getchar();
-#endif
-				if(cbuf.read_from_father[cluster_index - first_cluster] == 1) {
-#ifdef qrow_DEBUG
-					printf("copying from cbuf\n");
-#endif
-					cbuf_offset = (sector_index & (s->sectors_per_cluster - 1)) + (cluster_index - first_cluster) * s->sectors_per_cluster;
-#ifdef qrow_DEBUG_DETAIL
-				printf("cbuf_offset %d\n", cbuf_offset);
-#endif
-					memcpy(buf + buf_offset, cbuf.buf + cbuf_offset * BDRV_SECTOR_SIZE, len * BDRV_SECTOR_SIZE);
-#ifdef qrow_DEBUG_READ
-				dump_mem(buf, nb_sectors * BDRV_SECTOR_SIZE, "read buffer");
-				printf("Press Enter to continue...\n");
-				getchar();
-#endif
-				}
-				sector_index = first_sector_in_cluster(s, cluster_index + 1);
-				remain_sectors -= len;
-				buf_offset += len * BDRV_SECTOR_SIZE;
-			}
-		}
-
-	}
+			j++;				
+		}				
+	}	
 
 end:
-	if(cbuf.buf != NULL) {
-		qemu_free(cbuf.buf);
-		cbuf.buf = NULL;
-	}
-	if(cbuf.read_from_father != NULL) {
-		qemu_free(cbuf.read_from_father);
-		cbuf.read_from_father = NULL;
-	}
-	if(temp_buf != NULL) {
-		qemu_free(temp_buf);
-		temp_buf = NULL;
-	}
-#ifdef qrow_DEBUG
-	printf("qrow_read return %d" qrow_DEBUG_END_STR, ret);
+	
+#ifdef QROW_DEBUG
+	printf("qrow_read return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
 
 static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *buf, int nb_sectors) {
-	BDRVqrowState *s = bs->opaque;
-	int64_t first_cluster, last_cluster, current_cluster;
-	ClusterBuffer cbuf;
-	BlockDriver *drv;
+	BDRVQrowState *s = bs->opaque;
+	int64_t nb_clusters, sector_offset;
 	int ret = 0;
-
-	first_cluster = sector_num / s->sectors_per_cluster;
-	last_cluster = (sector_num + nb_sectors - 1) / s->sectors_per_cluster;
-
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_write()\n");
-	printf("sector_num: %" PRId64 "\n", sector_num);
-	printf("nb_sectors: %d\n", nb_sectors);
-	printf("sectors_per_cluster: %d\n", s->sectors_per_cluster);
-	printf("first_cluster: %" PRId64 "\n", first_cluster);
-	printf("last_cluster: %" PRId64 "\n", last_cluster);
-#endif
-
-	if(first_cluster >= s->total_clusters) { // 起始的cluster超过允许最大范围
-		fprintf (stderr, "Invalid sector_num!\n");
+	
+	if (s->cluster_offset >= s->total_clusters){ //磁盘已满
+		fprintf (stderr, "img is full!\n");
 		ret = -1;
 		goto end;
 	}
-	if(last_cluster >= s->total_clusters) { // 结束cluster超过允许最大范围
+	nb_clusters = (nb_sectors % s->sectors_per_cluster == 0) ? (nb_sectors / s->sectors_per_cluster) : (nb_sectors / s->sectors_per_cluster + 1);
+	if (s->cluster_offset + nb_clusters > s->total_clusters){ //写入区域超出磁盘最大范围
 		fprintf (stderr, "Invalid nb_sectors!\n");
 		ret = -1;
 		goto end;
 	}
-
-	cbuf.buf = NULL;
-	cbuf.read_from_father = NULL;
-	if(s->complete_image != 1) {
-		// 镜像不完整
-		cbuf.buf = qemu_memalign(512, 2 * s->cluster_size); // 用于存储从father读取的数据
-		memset(cbuf.buf, 0, 2 * s->cluster_size);
-		cbuf.read_from_father = qemu_mallocz(2); //用于表示buf中哪个cluster是从father中读取的
-		// 确保头尾的cluster在当前虚拟磁盘镜像中
-		if(qrow_assert_clusters(bs, &cbuf, sector_num, nb_sectors, qrow_WRITE) < 0) {
-			ret = -1;
-			goto end;
-		}
-	}
-
-	// 更新bitmap缓存
-	for(current_cluster = first_cluster; current_cluster <= last_cluster; current_cluster++) {
-		//if(qrow_get_bit(s, current_cluster) == 0)
-			qrow_set_bit(s, current_cluster);
-	}
-
-	// 头尾的cluster在当前虚拟磁盘镜像中，因此直接按sector写入即可
-	drv = s->qrow_irvd->drv;
-	ret = drv->bdrv_write(s->qrow_irvd, sector_num, buf, nb_sectors);
-	if(ret < 0) {
+	if(bdrv_pwrite(s->qrow_map_file,s->byte_offset, buf, nb_sectors*BDRV_SECTOR_SIZE) != nb_sectors*BDRV_SECTOR_SIZE) {
+		fprintf(stderr, "Failed to write \n");
+		ret = -1;
 		goto end;
 	}
-
-	// 更新btmp文件
-	if(qrow_update_btmp(s) < 0) {
-		fprintf (stderr, "Failed to update btmp file. (%s)\n", s->opened_btmp_file);
+	sector_offset = s->sector_offset;
+	for (int64_t i = sector_num, j = 1; j <= nb_sectors; i++, j++) //更新map数组的值，即更新虚拟磁盘和物理磁盘的数据映射关系 
+	{
+			s->map[i] = sector_offset;
+			sector_offset++;
+	}
+	s->map_is_dirty = 1;
+	// 更新map_file文件里面的map数组的值
+	if(qrow_update_map_file(s) < 0) {
+		fprintf (stderr, "Failed to update map_file. (%s)\n", s->map_file);
+		ret = -1;
+		goto end;
+	}
+	
+	s->cluster_offset += nb_clusters;
+	s->byte_offset = s->cluster_offset * s->cluster_size;
+	s->sector_offset = s->cluster_offset * s->sectors_per_cluster;
+	// 更新img_file文件里面的meta关于offset的值
+	if(qrow_update_img_file(s) < 0) {
+		fprintf (stderr, "Failed to update img_file. (%s)\n", s->img_file);
 		ret = -1;
 		goto end;
 	}
 
 end:
-	if(cbuf.buf != NULL) {
-		qemu_free(cbuf.buf);
-		cbuf.buf = NULL;
-	}
-	if(cbuf.read_from_father != NULL) {
-		qemu_free(cbuf.read_from_father);
-		cbuf.read_from_father = NULL;
-	}
-#ifdef qrow_DEBUG
-		printf("qrow_write return %d" qrow_DEBUG_END_STR, ret);
+	
+#ifdef QROW_DEBUG
+		printf("qrow_write return %d" QROW_DEBUG_END_STR, ret);
 #endif
 
 	return ret;
@@ -1632,8 +1472,8 @@ static int qrow_create_meta(qrowCreateState *cs) {
 	qemu_timeval tv;
 	int fd, cluster_bits, ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_create_meta\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create_meta\n");
 #endif
 
 	if(cs->disk_size == 0) {
@@ -1662,7 +1502,7 @@ static int qrow_create_meta(qrowCreateState *cs) {
 
     }
    copy_on_demand = cs->copy_on_demand;
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
    printf("disk_size %" PRId64 ", cluster_size %d, cluster_bits %d\n", disk_size, cluster_size, cluster_bits);
    printf("meta_file %s\n", cs->meta_file);
    printf("backing_file %s\n", cs->backing_file);
@@ -1729,7 +1569,7 @@ static int qrow_create_meta(qrowCreateState *cs) {
 
 
 end:
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("qrow_create_meta() return %d\n", ret);
 #endif
 	return ret;
@@ -1738,12 +1578,12 @@ end:
 
 
 static int qrow_create(const char *filename, QEMUOptionParameter *options) {
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create()\n");
 #endif
 	QRowMeta meta;
 	uint64_t disk_size;
-	uint32_t cluster_size 4096;
+	uint32_t cluster_size = 4096;
 	char *backing_file = NULL;
 	char *map_file = NULL;
 	uint64_t meta_size;
@@ -1813,13 +1653,26 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
    	
 	//将元数据写入到镜像文件中 
 	int fd;	
-	fd = open(meta.img_file, O_RDWR|O_CREAT|O_TRUNC|O_BINARY,0777);
+	fd = open(meta.img_file, O_WRONLY|O_CREAT|O_TRUNC|O_BINARY,0644);
+	
 	if (fd < 0) 
 	{
 		fprintf(stderr, "Can not open %s\n", meta.img_file);
 		ret = -1;
 		goto end;
 	}
+	//下面两个if语句实现了为稀疏文件meta.img_file预分配disk_size大小的空间
+	if(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, disk_size) < 0) {
+		fprintf(stderr, "Can not preallocate disk space for %s\n", meta.img_file);
+		ret = -1;
+		goto end;
+	}
+	if (ftruncate(fd, disk_size) != 0) {
+		fprintf(stderr, "Can not truncate %s to %" PRId64 " bytes\n", meta.img_file, disk_size);
+		ret = -1;
+		goto end;
+	}
+	
 	uint64_t writeByets = write(fd, &meta, sizeof(meta)); 
 	if(writeByets != sizeof(meta))
 	{
@@ -1833,41 +1686,59 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
    		ret = -1;
 		goto end;
    	}
-   	
+	
+	//创建并初始化map_file文件
+	int map_file_fd;
+	uint64_t map[MAX_VM_SECTOR_NUM];
+	memset(map, 0, sizeof(map));
+	map_file_fd = open(meta.map_file, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
+   	if(fd < 0) {
+		fprintf(stderr, "Can not open %s\n", meta.map_file);
+		ret = -1;
+		goto end;
+	}
+	write(map_file_fd, map,sizeof(map));
+
+	if(close(map_file_fd) != 0) {
+		fprintf(stderr, "Can not close %s\n", meta.map_file);
+		ret = -1;
+		goto end;
+	}
+	
 end:
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("qrow_create() return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
 
 static void qrow_flush(BlockDriverState *bs) {
-	BDRVqrowState *s = bs->opaque;
+	BDRVQrowState *s = bs->opaque;
 
-	//bdrv_flush(s->qrow_meta);
-	//bdrv_flush(s->qrow_btmp);
-	bdrv_flush(s->qrow_irvd);
+	bdrv_flush(s->qrow_img_file);
+	bdrv_flush(s->qrow_map_file);
+	//bdrv_flush(s->qrow_log_file);
 }
 
-typedef struct qrowAIOCB {
+typedef struct QRowAIOCB {
     BlockDriverAIOCB common;
     int64_t sector_num;
     QEMUIOVector *qiov;
     int nb_sectors;
     BlockDriverAIOCB *irvd_aiocb;
 
-} qrowAIOCB;
+} QRowAIOCB;
 
 static void qrow_aio_cancel(BlockDriverAIOCB *blockacb)
 {
-	qrowAIOCB *acb = (qrowAIOCB *)blockacb;
+	QRowAIOCB *acb = (QRowAIOCB *)blockacb;
     if (acb->irvd_aiocb)
         bdrv_aio_cancel(acb->irvd_aiocb);
     qemu_aio_release(acb);
 }
 
 static AIOPool qrow_aio_pool = {
-    .aiocb_size         = sizeof(qrowAIOCB),
+    .aiocb_size         = sizeof(QRowAIOCB),
     .cancel             = qrow_aio_cancel,
 };
 
@@ -1876,7 +1747,7 @@ static qrowAIOCB *qrow_aio_setup(BlockDriverState *bs,
         int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
         BlockDriverCompletionFunc *cb, void *opaque)
 {
-    qrowAIOCB *acb;
+    QRowAIOCB *acb;
 
     acb = qemu_aio_get(&qrow_aio_pool, bs, cb, opaque);
     if (!acb)
@@ -1889,128 +1760,67 @@ static qrowAIOCB *qrow_aio_setup(BlockDriverState *bs,
 }
 
 static void qrow_aio_readv_cb(void *opaque, int ret) {
-	qrowAIOCB *acb = opaque;
+	QRowAIOCB *acb = opaque;
 	BlockDriverState *bs = acb->common.bs;
-	BDRVqrowState *bqrows = bs->opaque;
-	int64_t first_cluster, last_cluster, nb_clusters, sector_index, cluster_index, buf_offset;
-	ClusterBuffer cbuf;
+	BDRVQrowState *bqrows = bs->opaque;
 	void *buf = NULL;
-	int remain_sectors, cbuf_offset, len;
-
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_aio_readv_cb()\n");
+	
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_aio_readv_cb()\n");
 #endif
 	if(ret < 0) {
 		fprintf(stderr, "aio_readv failed\n");
 		goto end;
 	}
-	   first_cluster = acb->sector_num / bqrows->sectors_per_cluster; // 起始cluster索引
-	   last_cluster = (acb->sector_num + acb->nb_sectors - 1) / bqrows->sectors_per_cluster; // 结束cluster索引
-
-		if(first_cluster >= bqrows->total_clusters) { // 起始的cluster超过允许最大范围
-			fprintf (stderr, "Invalid sector_num.\n");
-			ret = -1;
-			goto end;
-		}
-		if(last_cluster >= bqrows->total_clusters) { // 结束cluster超过允许最大范围
-			fprintf (stderr, "Invalid nb_sectors.\n");
-			ret = -1;
-			goto end;
-		}
-
-		cbuf.buf = NULL;
-		cbuf.read_from_father = NULL;
-		if(bqrows->complete_image != 1) {
-			// 镜像不完整
-			nb_clusters = last_cluster - first_cluster + 1;
-			cbuf.buf = qemu_memalign(512, nb_clusters * bqrows->cluster_size); // 用于存储从father读取的数据
-			memset(cbuf.buf, 0, nb_clusters * bqrows->cluster_size);
-			cbuf.read_from_father = qemu_mallocz(nb_clusters  + 1); // 用于表示buf中哪个cluster是从father中读取的，最后多余的一个空间是用于后面判断连续cluster长度
-			// 确保所有的cluster均在当前虚拟磁盘镜像中
-		   if(qrow_assert_clusters(bs, &cbuf, acb->sector_num, acb->nb_sectors, qrow_AIO_READ) < 0) {
-			   fprintf (stderr, "qrow_assert_clusters() failed.\n");
-			   ret = -1;
-			   goto end;
-		   }
-			// 更新btmp
-			qrow_update_btmp(bqrows);
-
-		   buf = qemu_malloc(acb->qiov->size);
-		   qemu_iovec_to_buffer(acb->qiov, buf);
-
-			sector_index = acb->sector_num;
-			remain_sectors = acb->nb_sectors;
-			buf_offset = 0;
-			while(remain_sectors > 0) {
-				cluster_index = sector_index / bqrows->sectors_per_cluster;
-				len = last_sector_in_cluster(bqrows, cluster_index) - sector_index + 1;
-				if(len > remain_sectors)
-					len = remain_sectors;
-	#ifdef qrow_DEBUG_DETAIL
-				printf("sector_index %" PRId64 ", cluster_index %" PRId64 ", buf_offset %" PRId64 ", len %d\n", sector_index, cluster_index, buf_offset, len);
-				//dump_mem(buf, nb_sectors * BDRV_SECTOR_SIZE, "read buffer");
-	#endif
-	#ifdef qrow_DEBUG_READ
-				printf("Press Enter to continue...\n");
-				getchar();
-	#endif
-				if(cbuf.read_from_father[cluster_index - first_cluster] == 1) {
-	#ifdef qrow_DEBUG
-					printf("copying from cbuf\n");
-	#endif
-					cbuf_offset = (sector_index & (bqrows->sectors_per_cluster - 1)) + (cluster_index - first_cluster) * bqrows->sectors_per_cluster;
-	#ifdef qrow_DEBUG_DETAIL
-				printf("cbuf_offset %d\n", cbuf_offset);
-	#endif
-	#ifdef qrow_DEBUG_READ
-				printf("Press Enter to continue...\n");
-				getchar();
-	#endif
-					memcpy(buf + buf_offset, cbuf.buf + cbuf_offset * BDRV_SECTOR_SIZE, len * BDRV_SECTOR_SIZE);
-				}
-				sector_index = first_sector_in_cluster(bqrows, cluster_index + 1);
-				remain_sectors -= len;
-				buf_offset += len * BDRV_SECTOR_SIZE;
+	uint64_t sector_offset;
+	buf = qemu_malloc(acb->qiov->size);
+	qemu_iovec_to_buffer(acb->qiov, buf);
+	for (int64_t i = acb->sector_num, j = 0; i < (acb->nb_sectors + acb->sector_num); i++) 
+	{
+		sector_offset = bqrows->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
+		//bqrows->map[i]为0时，要么是表示磁盘镜像的meta元数据占据的第一个sector，要么表示该虚拟扇区的数据为空
+		if(sector_offset < (bqrows->meta_cluster*bqrows->sectors_per_cluster)) //该磁盘内容为空(0)或者为header部分
+		{
+			continue; 
+		} 
+		else
+		{
+		 	if(bdrv_pread(bqrows->qrow_img_file, sector_offset*BDRV_SECTOR_SIZE, buf+j*BDRV_SECTOR_SIZE, BDRV_SECTOR_SIZE) != BDRV_SECTOR_SIZE) {
+				fprintf (stderr, "Failed to read the  data from %s\n", bqrows->img_file);
+				ret = -1;
+				goto end;
 			}
-
-			qemu_iovec_from_buffer(acb->qiov, buf, acb->qiov->size);
-		}
-
+			j++;				
+		}				
+	}		
+	qemu_iovec_from_buffer(acb->qiov, buf, acb->qiov->size);		
 	end:
 		if(buf != NULL) {
 			qemu_free(buf);
 			buf = NULL;
 		}
-		if(cbuf.buf != NULL) {
-			qemu_free(cbuf.buf);
-			cbuf.buf = NULL;
-		}
-		if(cbuf.read_from_father != NULL) {
-			qemu_free(cbuf.read_from_father);
-			cbuf.read_from_father = NULL;
-		}
 	    acb->common.cb(acb->common.opaque, ret);
 	    qemu_aio_release(acb);
-#ifdef qrow_DEBUG
-   printf("qrow_aio_readv_cb() return" qrow_DEBUG_END_STR);
+#ifdef QROW_DEBUG
+   printf("qrow_aio_readv_cb() return" QROW_DEBUG_END_STR);
 #endif
 }
 
 static BlockDriverAIOCB *qrow_aio_readv(BlockDriverState *bs,
         int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
         BlockDriverCompletionFunc *cb, void *opaque) {
-    qrowAIOCB *acb;
-    BDRVqrowState *bqrows = bs->opaque;
+    QRowAIOCB *acb;
+    BDRVQrowState *bqrows = bs->opaque;
     BlockDriver *drv;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_aio_readv()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_aio_readv()\n");
 	printf("sector_num %" PRId64 ", nb_sectors %d\n", sector_num, nb_sectors);
 #endif
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	dump_QEMUIOVector(qiov);
 #endif
-#ifdef qrow_DEBUG_AIO_READV
+#ifdef QROW_DEBUG_AIO_READV
 	printf("press Enter to continue...\n");
 	getchar();
 #endif
@@ -2019,19 +1829,19 @@ static BlockDriverAIOCB *qrow_aio_readv(BlockDriverState *bs,
     if (!acb)
         return NULL;
 	// 无论cluster是否存在于当前镜像中，都先将其读取，后面再将不在镜像中的数据填充进来
-	drv = bqrows->qrow_irvd->drv;
-	acb->irvd_aiocb = drv->bdrv_aio_readv(bqrows->qrow_irvd, sector_num, qiov, nb_sectors, qrow_aio_readv_cb, acb);
+	drv = bqrows->qrow_img_file->drv;
+	acb->irvd_aiocb = drv->bdrv_aio_readv(bqrows->qrow_img_file, sector_num, qiov, nb_sectors, qrow_aio_readv_cb, acb);
 	if(acb->irvd_aiocb == NULL){
 		qemu_aio_release(acb);
-#ifdef qrow_DEBUG
-   printf("qrow_aio_readv() return NULL" qrow_DEBUG_END_STR);
+#ifdef QROW_DEBUG
+   printf("qrow_aio_readv() return NULL" QROW_DEBUG_END_STR);
 #endif
 		return NULL;
 	}
 
 
-#ifdef qrow_DEBUG
-   printf("qrow_aio_readv() return %p" qrow_DEBUG_END_STR, &acb->common);
+#ifdef QROW_DEBUG
+   printf("qrow_aio_readv() return %p" QROW_DEBUG_END_STR, &acb->common);
 #endif
    return &acb->common;
 }
@@ -2045,14 +1855,14 @@ static BlockDriverAIOCB *qrow_aio_writev(BlockDriverState *bs,
 	BlockDriver *drv;
 	BlockDriverAIOCB *ret = NULL;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_aio_writev()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_aio_writev()\n");
 	printf("sector_num %" PRId64 ", nb_sectors %d", sector_num, nb_sectors);
 #endif
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	dump_QEMUIOVector(qiov);
 #endif
-#ifdef qrow_DEBUG_AIO_WRITEV
+#ifdef QROW_DEBUG_AIO_WRITEV
 	printf("press Enter to continue...\n");
 	getchar();
 #endif
@@ -2110,8 +1920,8 @@ end:
 		qemu_free(cbuf.read_from_father);
 		cbuf.read_from_father = NULL;
 	}
-#ifdef qrow_DEBUG
-   printf("qrow_aio_writev() return %p" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+   printf("qrow_aio_writev() return %p" QROW_DEBUG_END_STR, ret);
 #endif
    return ret;
 }
@@ -2121,14 +1931,14 @@ static BlockDriverAIOCB *qrow_aio_flush(BlockDriverState *bs,
 	BDRVqrowState *s = bs->opaque;
 	BlockDriverAIOCB *ret = NULL;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_aio_flush()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_aio_flush()\n");
 #endif
 
 	ret = bdrv_aio_flush(s->qrow_irvd, cb, opaque);
 
-#ifdef qrow_DEBUG
-	printf("qrow_aio_flush() return %p\n" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_aio_flush() return %p\n" QROW_DEBUG_END_STR, ret);
 #endif
 
 	return ret;
@@ -2208,10 +2018,10 @@ static int qrow_find_free_snapshot(BDRVqrowState *bqrows) {
 static int qrow_update_nb_children(BDRVqrowState *bqrows, qrowSnapshot *snap, int value) {
 	qrowSnapshot *father_snap;
 	int snap_index, ret = 0;
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_update_nb_children()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_update_nb_children()\n");
 #endif
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	printf("snap: %p, value: %d, btmp: %s\n", snap, value, snap->btmp_file);
 #endif
 	snap->nb_children += value;
@@ -2225,7 +2035,7 @@ static int qrow_update_nb_children(BDRVqrowState *bqrows, qrowSnapshot *snap, in
 				goto end;
 			}
 			father_snap = bqrows->snapshots + snap_index;
-	#ifdef qrow_DEBUG
+	#ifdef QROW_DEBUG
 			printf("recursive calling qrow_update_nb_children...\n");
 	#endif
 			qrow_update_nb_children(bqrows, father_snap, value);
@@ -2233,8 +2043,8 @@ static int qrow_update_nb_children(BDRVqrowState *bqrows, qrowSnapshot *snap, in
 	}
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_update_nb_children() return 0" qrow_DEBUG_END_STR);
+#ifdef QROW_DEBUG
+	printf("qrow_update_nb_children() return 0" QROW_DEBUG_END_STR);
 #endif
 	return ret;
 }
@@ -2246,8 +2056,8 @@ static int qrow_snapshot_add(BDRVqrowState *bqrows, qrowCreateState *cs, QEMUSna
 	qemu_timeval tv;
 	int snap_index;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_snapshot_add()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_snapshot_add()\n");
 #endif
 	bqrows->snapshots = qemu_realloc(bqrows->snapshots, (bqrows->nb_snapshots + 1) * sizeof(qrowSnapshot));
 
@@ -2303,8 +2113,8 @@ static int qrow_snapshot_add(BDRVqrowState *bqrows, qrowCreateState *cs, QEMUSna
 	memset(bqrows_cache, 0, sizeof(BDRVqrowState *) * bqrows->nb_snapshots);
 	bqrows->snapshots_is_dirty = 1;
 
-#ifdef qrow_DEBUG
-	printf("qrow_snapshot_add() return 0\n" qrow_DEBUG_END_STR);
+#ifdef QROW_DEBUG
+	printf("qrow_snapshot_add() return 0\n" QROW_DEBUG_END_STR);
 #endif
 	return 0;
 }
@@ -2347,9 +2157,9 @@ static int qrow_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
 	qrowSnapshot *free_snap, *old_snap, *snap;
 	int snap_index, offset, ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_snapshot_create()\n");
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_snapshot_create()\n");
+#ifdef QROW_DEBUG_DETAIL
 	dump_BDRVqrowState(s);
 #endif
 #endif
@@ -2378,7 +2188,7 @@ static int qrow_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
 	strncpy(cs->father_btmp_file, s->current_btmp_file, MAX_FILE_NAME_LENGTH); // 其father文件为老的当前镜像
 
 	snap_index = qrow_find_free_snapshot(s);
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("free snapshot index: %d\n", snap_index);
 #endif
 	if(snap_index >= 0) { // 找到空闲快照
@@ -2392,7 +2202,7 @@ static int qrow_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
 		offset = 0;
 		for(snap_index = 0; snap_index < s->nb_snapshots; snap_index++) {
 			snap = old_snap + snap_index;
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 			printf("old_snap: %p, snap_index: %d, free_snap: %p, snap: %p\n", old_snap, snap_index, free_snap, snap);
 			dump_snapshot(snap);
 #endif
@@ -2404,7 +2214,7 @@ static int qrow_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
 
 		qrow_close_snapshots2(old_snap, s->nb_snapshots);
 		s->nb_snapshots -= 1;
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 		printf("snapshots after delete free snapshot:\n");
 		dump_snapshots(s);
 #endif
@@ -2433,7 +2243,7 @@ static int qrow_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
 		goto end;
 	}
 
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	printf("snapshots after qrow_snapshot_add():\n");
 	dump_snapshots(s);
 #endif
@@ -2472,10 +2282,10 @@ static int qrow_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
 	}
 
 end:
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("BDRVqrowState after create snapshot %s\n", sn_info->name);
-	printf("qrow_snapshot_create() return %d" qrow_DEBUG_END_STR, ret);
-#ifdef qrow_DEBUG_DETAIL
+	printf("qrow_snapshot_create() return %d" QROW_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG_DETAIL
 	dump_BDRVqrowState(s);
 #endif
 #endif
@@ -2511,8 +2321,8 @@ static int qrow_save_vmstate2(BDRVqrowState *bqrows, const uint8_t *buf, int64_t
 	uint8_t *buf = NULL;
 	int ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_copy_vmstate()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_copy_vmstate()\n");
 #endif
 
 	target_bqrows = qrow_open_previous_state(bqrows, snapshot_index);
@@ -2545,8 +2355,8 @@ static int qrow_save_vmstate2(BDRVqrowState *bqrows, const uint8_t *buf, int64_t
 	}
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_copy_vmstate() return %d" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_copy_vmstate() return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	if(target_bqrows != NULL) {
 		qrow_close_previous_state(target_bqrows);
@@ -2566,8 +2376,8 @@ static int qrow_snapshot_goto(BlockDriverState *bs, const char *snapshot_id) {
 	qrowSnapshot *target_snap, *current_snap, *father_snap;
 	int snap_index, ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_snapshot_goto()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_snapshot_goto()\n");
 #endif
 
 	if(strcmp(snapshot_id, "0") == 0 || strcmp(snapshot_id, "current state") == 0) {
@@ -2653,8 +2463,8 @@ static int qrow_snapshot_goto(BlockDriverState *bs, const char *snapshot_id) {
 
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_snapshot_goto() return %d" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_snapshot_goto() return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
@@ -2666,10 +2476,10 @@ static int qrow_snapshot_delete(BlockDriverState *bs, const char *snapshot_id) {
 	int snap_index, ret = 0;
 
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_snapshot_delete()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_snapshot_delete()\n");
 	printf("snapshot_id: %s\n", snapshot_id);
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	dump_BDRVqrowState(s);
 #endif
 #endif
@@ -2714,21 +2524,21 @@ static int qrow_snapshot_delete(BlockDriverState *bs, const char *snapshot_id) {
 		}
 	}
 
-#ifdef qrow_DEBUG
+#ifdef QROW_DEBUG
 	printf("\ntarget snapshot index: %d, target_snap: %p\n", snap_index, target_snap);
 #endif
 
 	s->snapshots_is_dirty = 1;
 	// 更新meta中的快照信息
 	qrow_update_meta(s, NULL, 0);
-#ifdef qrow_DEBUG_DETAIL
+#ifdef QROW_DEBUG_DETAIL
 	printf("BDRVqrowState after delete snapshot %s\n", snapshot_id);
 	dump_BDRVqrowState(s);
 #endif
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_snapshot_delete() return %d" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_snapshot_delete() return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
@@ -2775,14 +2585,14 @@ static int qrow_snapshot_list(BlockDriverState *bs, QEMUSnapshotInfo **psn_tab) 
 }
 
 static int qrow_get_info(BlockDriverState *bs, BlockDriverInfo *bdi) {
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_get_info()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_get_info()\n");
 #endif
 	BDRVqrowState *s = bs->opaque;
 	bdi->cluster_size = s->cluster_size;
 	bdi->vm_state_offset = qrow_vm_state_offset(s);
-#ifdef qrow_DEBUG
-	printf("return from qrow_get_info()" qrow_DEBUG_END_STR);
+#ifdef QROW_DEBUG
+	printf("return from qrow_get_info()" QROW_DEBUG_END_STR);
 #endif
 	return 0;
 }
@@ -2792,8 +2602,8 @@ static int qrow_save_vmstate(BlockDriverState *bs, const uint8_t *buf, int64_t p
 	BDRVqrowState *bqrows = bs->opaque;
 	int ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_save_vmstate()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_save_vmstate()\n");
 	printf("vm_state_size %d, pos %" PRId64 ", size %d\n", bqrows->vm_state_size, pos, size);
 #endif
 
@@ -2803,8 +2613,8 @@ static int qrow_save_vmstate(BlockDriverState *bs, const uint8_t *buf, int64_t p
 
 	ret = qrow_save_vmstate2(bqrows, buf, pos, size);
 
-#ifdef qrow_DEBUG
-	printf("qrow_save_vmstate() return %d" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_save_vmstate() return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }
@@ -2814,8 +2624,8 @@ static int qrow_load_vmstate(BlockDriverState *bs, uint8_t *buf, int64_t pos, in
 	BDRVqrowState *target_bqrows = NULL, *bqrows = bs->opaque;
 	int target_index, ret = 0;
 
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_load_vmstate()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_load_vmstate()\n");
 	printf("vm_state_size %d, pos %" PRId64 ", size %d\n", bqrows->vm_state_size, pos, size);
 #endif
 	// savevm.c 1777行load_vmstate()中，在1797行先调用bdrv_snapshot_goto()将磁盘状态回滚,然后在1875行调用qemu_loadvm_state()载入vm状态
@@ -2840,8 +2650,8 @@ static int qrow_load_vmstate(BlockDriverState *bs, uint8_t *buf, int64_t pos, in
 	ret = qrow_load_vmstate2(target_bqrows, buf, pos, size);
 
 end:
-#ifdef qrow_DEBUG
-	printf("qrow_load_vmstate() return %d" qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_load_vmstate() return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	if(target_bqrows != NULL) {
 		qrow_close_previous_state(target_bqrows);
@@ -2875,14 +2685,14 @@ static int qrow_check(BlockDriverState *bs) {
 }
 
 static int64_t qrow_get_length(BlockDriverState *bs) {
-#ifdef qrow_DEBUG
-	printf(qrow_DEBUG_BEGIN_STR "We are in qrow_get_lenght()\n");
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_get_lenght()\n");
 #endif
 	BDRVqrowState *bqrows = bs->opaque;
 	int64_t ret;
 	ret = bqrows->disk_size;
-#ifdef qrow_DEBUG
-	printf("qrow_get_lenght() return %" PRId64 qrow_DEBUG_END_STR, ret);
+#ifdef QROW_DEBUG
+	printf("qrow_get_lenght() return %" PRId64 QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 }

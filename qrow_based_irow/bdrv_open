@@ -1,0 +1,33 @@
+int bdrv_open(BlockDriverState *bs, const char *filename, int flags,BlockDriver *drv)
+{
+	/* Find the right image format driver */
+    if (!drv) {
+        ret = find_image_format(filename, &drv)
+		{
+			BlockDriverState *bs;
+
+			ret = bdrv_file_open(&bs, filename, 0)//将虚拟机磁盘按无格式的一般文件打开
+			{
+				BlockDriver *drv;
+				drv = bdrv_find_protocol(filename);
+				ret = bdrv_open_common(bs, filename, flags, drv)
+				{
+					bdrv_file_open();
+				}
+			}
+			ret = bdrv_pread(bs, 0, buf, sizeof(buf));//读取磁盘的前2048字节
+			/*
+			
+				然后将这2048字节依次传递给qemu-kvm虚拟块设备驱动链表中的每一个虚拟块设备驱动的bdrv_probe函数进行打分
+				qemu-kvm会记录给出最高评分的虚拟块设备驱动，给出最高评分的驱动对应的格式即为该虚拟机磁盘的格式。确定虚拟机磁盘镜像后，
+				qemu-kvm会将相应的虚拟块设备驱动保存到BlockDriverState结构体的drv指针中，并按照该驱动的instance_size分配BlockDriverState结构体的
+				opaque指针指向的内存空间
+			*/
+		}
+		
+    }
+	
+	ret = bdrv_open_common(bs, filename, flags, drv);//按照各个格式的open函数打来磁盘文件
+
+    
+}
