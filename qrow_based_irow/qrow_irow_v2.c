@@ -28,7 +28,7 @@
 #define QROW_DEBUG_WRITE
 //#define QROW_DEBUG_AIO_READV
 //#define QROW_DEBUG_AIO_WRITEV
-#define QROW_DEBUG_READ_MISSING_CLUSTSERS2
+
 
 static void dump_QEMUIOVector(QEMUIOVector *qiov) {
 	int i;
@@ -43,21 +43,6 @@ static void dump_QEMUIOVector(QEMUIOVector *qiov) {
 
 #endif
 
-static int get_bits_from_size(size_t size)
-{ // 如果size=2^n，那么返回n，否则返回－1
-    int ret = 0;
-    if (size == 0) {
-        return -1;
-    }
-    while (size != 1) {
-    	if (size & 1) {// 不是2的幂
-    		return -1;
-        }
-        size >>= 1;
-        ret++;
-    }
-    return ret;
-}
 
 static int qrow_probe(const uint8_t *buf, int buf_size, const char *filename)
 { // 检测魔数、版本并打分
@@ -92,14 +77,14 @@ static int qrow_update_map_file(BDRVqrowState *bqrows) {
 	printf("map_is_dirty %d\n", bqrows->map_is_dirty);
 #endif
 	if(bqrows->map_is_dirty) {
-		if(bdrv_pwrite(bqrows->qrow_map_file, 0, bqrows->map, sizeof(bqrows->map)) != sizeof(bqrows->map)) {
+		if(bdrv_pwrite(bqrows->qrow_map_file, 0, bqrows->map, bqrows->map_size*sizeof(uint64_t) ) != bqrows->map_size*sizeof(uint64_t)) {
 			fprintf(stderr, "Failed to write the qrow map data to %s\n", bqrows->map_file);
 			ret = -1;
 			goto end;
 		}
 		bqrows->map_is_dirty = 0;
 		// bdrv_pwrite是按sector写入，文件不是整sector的话需要截断
-		ret = bdrv_truncate(bqrows->qrow_map_file, sizeof(bqrows->map));
+		ret = bdrv_truncate(bqrows->qrow_map_file, bqrows->map_size*sizeof(uint64_t));
 		
 	}
 	
@@ -112,12 +97,13 @@ end:
 
 static int qrow_update_img_file(BDRVqrowState *bqrows) {
 	QRowMeta meta;
+	int ret = 0;
 	if(bdrv_pread (bqrows->qrow_img_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
 			fprintf (stderr, "Failed to read the meta data from %s\n", bqrows->qrow_img_file);
 			ret = -1;
 			goto end;
 	}
-	meta.cluster_offset = cpu_to_be64(bqrows->cluster_offset);
+	meta.sector_offset = cpu_to_be64(bqrows->sector_offset);
 	if(bdrv_pwrite(bqrows->qrow_img_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
 		fprintf (stderr, "Failed to write the meta data to %s\n", bqrows->img_file);
 		ret = -1;
@@ -254,21 +240,15 @@ static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const
 	}
 	be32_to_cpus(&meta.magic);
 	be32_to_cpus(&meta.version);
-	be32_to_cpus(&meta.cluster_size);
-	be32_to_cpus(&meta.cluster_bits);
-	be32_to_cpus(&meta.sectors_per_cluster);
-	be64_to_cpus(&meta.total_clusters);
+	be64_to_cpus(&meta.total_sectors);
 	be64_to_cpus(&meta.disk_size);
-	be64_to_cpus(&meta.cluster_offset);
+	be64_to_cpus(&meta.sector_offset);
 #ifdef IROW_DEBUG_DETAIL
 	printf("meta.magic: %x\n", meta.magic);
 	printf("meta.version: %x\n", meta.version);
-	printf("meta.cluster_size: 0x%x(%dK)\n", meta.cluster_size, meta.cluster_size / 1024);
-	printf("meta.cluster_bits: %d\n", meta.cluster_bits);
-	printf("meta.total_clusters: 0x%" PRIx64 "(%" PRId64 ")\n", meta.total_clusters, meta.total_clusters);
-	printf("meta.sectors_per_cluster: %d\n", meta.sectors_per_cluster);
+	printf("meta.total_sectors: 0x%" PRIx64 "(%" PRId64 ")\n", meta.total_sectors, meta.total_sectors);
 	printf("meta.disk_size: 0x%" PRIx64 "(%" PRId64 "M)\n", meta.disk_size, meta.disk_size / (1024 * 1024));
-	printf("meta.cluster_offset: 0x%\n", meta.cluster_offset);
+	printf("meta.sector_offset: 0x%\n", meta.sector_offset);
 #endif
 
 	if(meta.magic != IROW_MAGIC || meta.version != IROW_VERSION) {
@@ -276,36 +256,9 @@ static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const
 		ret = -1;
 		goto end;
 	}
-	// 判断cluster大小是否合法
-	if((meta.cluster_bits < MIN_CLUSTER_BITS) || (meta.cluster_bits > MAX_CLUSTER_BITS)) {
-		fprintf (stderr, "Invalid cluster_bits!\n");
-		ret = -1;
-		goto end;
-	}
-	// 判断cluster_size和cluster_bits是否匹配
-	if(meta.cluster_bits != get_bits_from_size(meta.cluster_size)) {
-		fprintf (stderr, "cluster_size and cluster_bits do not match!\n");
-		ret = -1;
-		goto end;
-	}
-	// 判断total_clusters和disk_size是否匹配
-	if(meta.total_clusters != ((meta.disk_size + meta.cluster_size - 1) >> meta.cluster_bits)) {
-		fprintf (stderr, "total_clusters and disk_size do not match!\n");
-		ret = -1;
-		goto end;
-	}
-	// 判断sectors_per_cluster是否合法
-	if(meta.sectors_per_cluster != (meta.cluster_size >> BDRV_SECTOR_BITS)) {
-		fprintf (stderr, "Invalid sectors_per_cluster!\n");
-		ret = -1;
-		goto end;
-	}
-	bqrows->cluster_size = meta.cluster_size;
-	bqrows->cluster_bits = meta.cluster_bits;
-	bqrows->total_clusters = meta.total_clusters;
-	bqrows->sectors_per_cluster = meta.sectors_per_cluster;
+	bqrows->total_sectors = meta.total_sectors;
 	bqrows->disk_size = meta.disk_size;
-	bs->total_sectors = meta.disk_size / BDRV_SECTOR_SIZE;
+	bs->total_sectors = meta.total_sectors;
 	/* //没办法使用lseek这个函数
 	int fd = open(filename, O_RDWR|O_BINARY, 0333);//打开磁盘文件
 	if (fd < 0) 
@@ -318,10 +271,9 @@ static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const
 	uint64_t cur_cluster_offset = (cur_disk_size % s->cluster_size == 0) ? (cur_disk_size / s->cluster_size) : (cur_disk_size / s->cluster_size+1);
 	s->cluster_offset = (s->cluster_offset < cur_cluster_offset) ? cur_cluster_offset : s->cluster_offset;
 	*/
-	bqrows->cluster_offset = meta.cluster_offset；
-	bqrows->byte_offset = bqrows->cluster_offset * bqrows->cluster_size;
-	bqrows->sector_offset = bqrows->cluster_offset * bqrows->sectors_per_cluster;
-	bqrows->meta_cluster = if(sizeof(meta) % meta.cluster_size == 0 )? (sizeof(meta) / meta.cluster_size): (sizeof(meta) / meta.cluster_size + 1);
+	bqrows->sector_offset = meta.sector_offset;
+	bqrows->byte_offset = bqrows->sector_offset * BDRV_SECTOR_SIZE;
+	bqrows->meta_sector = if(sizeof(meta) % BDRV_SECTOR_SIZE == 0 )? (sizeof(meta) / BDRV_SECTOR_SIZE): (sizeof(meta) / BDRV_SECTOR_SIZE + 1);
 	bqrows->map_size = meta.disk_size / BDRV_SECTOR_SIZE;
 	bqrows->img_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
 	strncpy(bqrows->img_file, filename, MAX_FILE_NAME_LENGTH);
@@ -377,16 +329,15 @@ fail:
 
 static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *buf, int nb_sectors) {
 	BDRVQrowState *s = bs->opaque;
-	int64_t nb_clusters, sector_offset;
-	int ret = 1;
+	int64_t sector_offset;
+	int ret = 0;
 	
-	if (s->cluster_offset >= s->total_clusters){ //磁盘已满
+	if (s->sector_offset >= s->total_sectors){ //磁盘已满
 		fprintf (stderr, "img is full!\n");
 		ret = -1;
 		goto end;
 	}
-	nb_clusters = (nb_sectors % s->sectors_per_cluster == 0) ? (nb_sectors / s->sectors_per_cluster) : (nb_sectors / s->sectors_per_cluster + 1);
-	if (s->cluster_offset + nb_clusters > s->total_clusters){ //写入区域超出磁盘最大范围
+	if (s->sector_offset + nb_sectors > s->total_sectors){ //写入区域超出磁盘最大范围
 		fprintf (stderr, "Invalid nb_sectors!\n");
 		ret = -1;
 		goto end;
@@ -410,9 +361,8 @@ static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *b
 		goto end;
 	}
 	
-	s->cluster_offset += nb_clusters;
-	s->byte_offset = s->cluster_offset * s->cluster_size;
-	s->sector_offset = s->cluster_offset * s->sectors_per_cluster;
+	s->sector_offset += nb_sectors;
+	s->byte_offset = s->sector_offset * BDRV_SECTOR_SIZE;
 	// 更新img_file文件里面的meta关于offset的值
 	if(qrow_update_img_file(s) < 0) {
 		fprintf (stderr, "Failed to update img_file. (%s)\n", s->img_file);
@@ -441,138 +391,22 @@ static int qrow_generate_filename(char *dest, const char *prefix, const char *su
 	return 0;
 }
 
-static int qrow_create_meta(qrowCreateState *cs) {
-	qrowMeta meta;
-	qrowSnapshotHeader snap_header;
-	uint32_t cluster_size, copy_on_demand;
-	uint64_t disk_size;
-	qemu_timeval tv;
-	int fd, cluster_bits, ret = 0;
-
-#ifdef QROW_DEBUG
-	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create_meta\n");
-#endif
-
-	if(cs->disk_size == 0) {
-		fprintf(stderr, "Invalid disk_size\n");
-		ret = -1;
-		goto end;
-	}
-	disk_size = cs->disk_size;
-
-	if(cs->cluster_size == 0) {
-		fprintf(stderr, "Invalid cluster_size\n");
-		ret = -1;
-		goto end;
-	}
-	cluster_size = cs->cluster_size;
-
-   cluster_bits = get_bits_from_size(cluster_size); // cluster大小的位数，即 1 << cluster_bits == cluster_size
-   cs->cluster_bits = cluster_bits;
-   if ((cluster_bits < MIN_CLUSTER_BITS) || (cluster_bits > MAX_CLUSTER_BITS)) {
-	   // cluster最小512B(至少包括一个sector)，最大2MB,且必须是2的幂
-    	fprintf(stderr, "Cluster size must be a power of two between %d and %dk\n",
-            1 << MIN_CLUSTER_BITS,
-            1 << (MAX_CLUSTER_BITS - 10));
-    	ret =  -1;
-    	goto end;
-
-    }
-   copy_on_demand = cs->copy_on_demand;
-#ifdef QROW_DEBUG
-   printf("disk_size %" PRId64 ", cluster_size %d, cluster_bits %d\n", disk_size, cluster_size, cluster_bits);
-   printf("meta_file %s\n", cs->meta_file);
-   printf("backing_file %s\n", cs->backing_file);
-#endif
-   if(cs->meta_file[0] == '\0') {
-	   fprintf(stderr, "Void meta file name\n");
-	   ret = -1;
-	   goto end;
-   }
-   fd = open(cs->meta_file, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
-	if (fd < 0) {
-		fprintf(stderr, "Can not open %s\n", cs->meta_file);
-		ret = -1;
-		goto end;
-	}
-	memset(&meta, 0, sizeof(meta));
-	meta.magic = cpu_to_be32(qrow_MAGIC);
-   	meta.version = cpu_to_be32(qrow_VERSION);
-   	meta.copy_on_demand = cpu_to_be32(copy_on_demand);
-   	meta.cluster_size = cpu_to_be32(cluster_size); // cluster字节数
-   	meta.cluster_bits = cpu_to_be32(cluster_bits); // cluster位数
-   	meta.total_clusters = cpu_to_be64((disk_size + cluster_size -1) >> cluster_bits); // 磁盘镜像总的cluster数量
-   	meta.sectors_per_cluster = cpu_to_be32(cluster_size >> BDRV_SECTOR_BITS);
-   	meta.disk_size = cpu_to_be64(disk_size); // 虚拟磁盘字节数
-   	meta.nb_snapshots = cpu_to_be32(1); // 快照数,当前状态也占用一个快照信息，所以创建时快照数为1
-
-   	if(qrow_generate_filename(meta.current_btmp, cs->meta_file, cs->time_value, "btmp") < 0) { // 当前bitmap文件
-   		ret = -1;
-   		goto end;
-   	}
-
-   	if(qrow_generate_filename(cs->irvd_file, cs->meta_file, cs->time_value, "irvd") < 0) { // 当前irvd文件
-   	   	ret = -1;
-   	   	goto end;
-   	}
-
-   	// 处理base image
-   	if(cs->backing_file != NULL) {
-   		strncpy(meta.backing_file, cs->backing_file, MAX_FILE_NAME_LENGTH);
-   	}
-
-   	strncpy(cs->btmp_file, meta.current_btmp, MAX_FILE_NAME_LENGTH);
-
-   	memset(&snap_header, 0, sizeof(snap_header));
-
-   snap_header.snap_magic = cpu_to_be32(qrow_SNAPHEADER_MAGIC);
-   sprintf(snap_header.id_str, "0");
-   sprintf(snap_header.name, "current state");
-   	strncpy(snap_header.btmp_file, cs->btmp_file, MAX_FILE_NAME_LENGTH);
-   	strncpy(snap_header.irvd_file, cs->irvd_file, MAX_FILE_NAME_LENGTH);
-   	qemu_gettimeofday(&tv); // 获取当前时间
-   	snap_header.date_sec = tv.tv_sec;
-   	snap_header.date_nsec = tv.tv_usec * 1000;
-   	snap_header.nb_children = 0; // 没有孩子快照
-   	snap_header.is_deleted = 0; // 没有被删除
-
-    // 写入meta文件
-   	write(fd, &meta, sizeof(meta)); // 写入meta头
-   	write(fd, &snap_header, sizeof(snap_header)); // 写入当前状态的snapshot header
-
-   	if(close(fd) != 0) {
-   		ret = -1;
-   	}
-
-
-end:
-#ifdef QROW_DEBUG
-	printf("qrow_create_meta() return %d\n", ret);
-#endif
-	return ret;
-}
-
-
-
 static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create()\n");
 #endif
 	QRowMeta meta;
 	uint64_t disk_size;
-	uint32_t cluster_size = 4096;
 	char *backing_file = NULL;
 	char *map_file = NULL;
 	uint64_t meta_size;
-	uint64_t cluster_offset;
-	
+	uint64_t sector_offset;
+	int ret = 0;
 	// 解析参数
 	while (options && options->name) {
 		if (!strcmp(options->name, BLOCK_OPT_SIZE)) {
 				disk_size= options->value.n;
-			} else if (!strcmp(options->name, BLOCK_OPT_CLUSTER_SIZE)) {
-				cluster_size = options->value.n;	
-			} else if (!strcmp(options->name, BLOCK_OPT_BACKING_FILE)) {
+			}else if (!strcmp(options->name, BLOCK_OPT_BACKING_FILE)) {
 	            backing_file = options->value.s;
 			} 
 	        options++;
@@ -585,42 +419,24 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 		ret = -1;
 		goto end;
 	}
-	if(cluster_size == 0) {
-		fprintf(stderr, "Invalid cluster_size\n");
-		ret = -1;
-		goto end;
-	}
 	if(filename[0] == '\0') {
 	   fprintf(stderr, "Void img file name\n");
 	   ret = -1;
 	   goto end;
    	} 
 	
-	uint32_t cluster_bits = get_bits_from_size(cluster_size); // 获取cluster_bits
-	if ((cluster_bits < MIN_CLUSTER_BITS) || (cluster_bits > MAX_CLUSTER_BITS)) {
-    	fprintf(stderr, "cluster size must be a power of two between %d and %dB\n",
-            1 << MIN_CLUSTER_BITS,
-            1 << MAX_CLUSTER_BITS);
-        ret =  -1;
-    	goto end;
-    	
-    } 
-	  
 	// 计算出元数据头需要的所有信息
     memset(&meta, 0, sizeof(meta));
     meta.magic = cpu_to_be32(QROW_MAGIC);	
 	meta.version = cpu_to_be32(QROW_VERSION);
 	meta.disk_size = cpu_to_be64(disk_size);
-	meta.cluster_size = cpu_to_be32(cluster_size);
-    meta.cluster_bits = cpu_to_be32(cluster_bits);
-   	meta.total_clusters = cpu_to_be64((disk_size + cluster_size -1) >> cluster_bits); // 磁盘镜像总的cluster数量
-   	meta.sectors_per_cluster = cpu_to_be32(cluster_size >> BDRV_SECTOR_BITS);
+   	meta.total_sectors = cpu_to_be64(disk_size/BDRV_SECTOR_SIZE); // 磁盘镜像总的sector数量
 	meta_size = sizeof(meta);
 	if( meta_size > 0 )
 	{
-		cluster_offset = if(meta_size % cluster_size == 0) ? (meta_size / cluster_size) : (meta_size / cluster_size + 1);
+		sector_offset = if(meta_size % BDRV_SECTOR_SIZE == 0) ? (meta_size / BDRV_SECTOR_SIZE) : (meta_size / BDRV_SECTOR_SIZE + 1);
 	}
-	meta.cluster_offset = cpu_to_be64(cluster_offset);//元数据存放在镜像的最开始位置 
+	meta.sector_offset = cpu_to_be64(sector_offset);//元数据存放在镜像的最开始位置 
     strncpy(meta.img_file, filename, MAX_FILE_NAME_LENGTH);
     strncpy(meta.backing_file, backing_file, MAX_FILE_NAME_LENGTH);//这个具体怎么用？？？ 
 	if(qrow_generate_filename(meta.map_file, meta.img_file, "map") < 0) { // map_file文件
@@ -659,7 +475,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	}
 	
 	if(close(fd) != 0) {
-		fprintf(stderr, "Can not close %s\n", img_file);
+		fprintf(stderr, "Can not close %s\n", meta.img_file);
    		ret = -1;
 		goto end;
    	}
@@ -668,7 +484,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	int map_file_fd;
 	
 	uint64_t *map = NULL;
-	uint64_t map_size = (disk_size)/BDRV_SECTOR_SIZE;
+	uint64_t map_size = disk_size/BDRV_SECTOR_SIZE;
 	map = qemu_malloc(map_size*sizeof(uint64_t));
 	memset(map, 0, map_size*sizeof(uint64_t));
 	map_file_fd = open(meta.map_file, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
@@ -677,7 +493,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 		ret = -1;
 		goto end;
 	}
-	write(map_file_fd, map,sizeof(map));
+	write(map_file_fd, map,map_size*sizeof(uint64_t));
 
 	if(close(map_file_fd) != 0) {
 		fprintf(stderr, "Can not close %s\n", meta.map_file);
@@ -690,7 +506,11 @@ end:
 	printf("qrow_create() return %d" QROW_DEBUG_END_STR, ret);
 #endif
 	if(map != NULL)
+	{
 		qemu_free(map);
+		map = NULL;
+	}
+	
 	return ret;
 }
 
@@ -698,7 +518,7 @@ static void qrow_flush(BlockDriverState *bs) {
 	BDRVQrowState *s = bs->opaque;
 
 	bdrv_flush(s->qrow_img_file);
-	bdrv_flush(s->qrow_map_file);
+	//bdrv_flush(s->qrow_map_file);
 	//bdrv_flush(s->qrow_log_file);
 }
 
@@ -761,7 +581,7 @@ static void qrow_aio_readv_cb(void *opaque, int ret) {
 	{
 		sector_offset = bqrows->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
 		//bqrows->map[i]为0时，要么是表示磁盘镜像的meta元数据占据的第一个sector，要么表示该虚拟扇区的数据为空
-		if(sector_offset < (bqrows->meta_cluster*bqrows->sectors_per_cluster)) //该磁盘内容为空(0)或者为header部分
+		if(sector_offset < (bqrows->meta_sector)) //该磁盘内容为空(0)或者为header部分
 		{
 			continue; 
 		} 
@@ -849,13 +669,12 @@ static BlockDriverAIOCB *qrow_aio_writev(BlockDriverState *bs,
 	printf("press Enter to continue...\n");
 	getchar();
 #endif
-	int64_t nb_clusters, sector_offset;
-	if (s->cluster_offset >= s->total_clusters){ //磁盘已满
+	int64_t sector_offset;
+	if (s->sector_offset >= s->total_sectors){ //磁盘已满
 		fprintf (stderr, "img is full!\n");
 		goto end;
 	}
-	nb_clusters = (nb_sectors % s->sectors_per_cluster == 0) ? (nb_sectors / s->sectors_per_cluster) : (nb_sectors / s->sectors_per_cluster + 1);
-	if (s->cluster_offset + nb_clusters > s->total_clusters){ //写入区域超出磁盘最大范围
+	if (s->sector_offset + nb_sectors > s->total_sectors){ //写入区域超出磁盘最大范围
 		fprintf (stderr, "Invalid nb_sectors!\n");
 		goto end;
 	}
@@ -881,9 +700,8 @@ static BlockDriverAIOCB *qrow_aio_writev(BlockDriverState *bs,
 		goto end;
 	}
 	
-	s->cluster_offset += nb_clusters;
-	s->byte_offset = s->cluster_offset * s->cluster_size;
-	s->sector_offset = s->cluster_offset * s->sectors_per_cluster;
+	s->sector_offset += nb_sectors;
+	s->byte_offset = s->sector_offset * BDRV_SECTOR_SIZE;
 	// 更新img_file文件里面的meta关于offset的值
 	if(qrow_update_img_file(s) < 0) {
 		fprintf (stderr, "Failed to update img_file. (%s)\n", s->img_file);
@@ -920,7 +738,7 @@ static int qrow_get_info(BlockDriverState *bs, BlockDriverInfo *bdi) {
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_get_info()\n");
 #endif
 	BDRVQrowState *s = bs->opaque;
-	bdi->cluster_size = s->cluster_size;
+	//bdi->cluster_size = s->cluster_size;
 	//bdi->vm_state_offset = qrow_vm_state_offset(s);
 #ifdef QROW_DEBUG
 	printf("return from qrow_get_info()" QROW_DEBUG_END_STR);
@@ -947,11 +765,6 @@ static QEMUOptionParameter qrow_create_options[] = {
         .name = BLOCK_OPT_SIZE,
         .type = OPT_SIZE,
         .help = "Virtual disk size"
-    },
-    {
-        .name = BLOCK_OPT_CLUSTER_SIZE,
-        .type = OPT_SIZE,
-        .help = "qrow cluster size"
     },
     {
         .name = BLOCK_OPT_BACKING_FILE,
@@ -982,20 +795,11 @@ static BlockDriver bdrv_qrow = {
     .bdrv_aio_readv		= qrow_aio_readv,
     .bdrv_aio_writev	= qrow_aio_writev,
     .bdrv_aio_flush		= qrow_aio_flush,
-
-    .bdrv_snapshot_create   = qrow_snapshot_create,
-    .bdrv_snapshot_goto     = qrow_snapshot_goto,
-    .bdrv_snapshot_delete   = qrow_snapshot_delete,
-    .bdrv_snapshot_list     = qrow_snapshot_list,
-
+ 
     .bdrv_get_info	= qrow_get_info,
     .bdrv_getlength = qrow_get_length,
-
-    .bdrv_save_vmstate    = qrow_save_vmstate,
-    .bdrv_load_vmstate    = qrow_load_vmstate,
-
     .create_options = qrow_create_options,
-    .bdrv_check = qrow_check,
+
 };
 
 static void bdrv_qrow_init(void)

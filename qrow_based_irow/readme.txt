@@ -1,0 +1,2 @@
+qrow_irow_v1.c 是原始的，镜像文件以cluster为单位
+qrow_irow_v2.c 是镜像文件以sector为单位
