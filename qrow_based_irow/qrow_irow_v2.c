@@ -1,6 +1,5 @@
-/* qrow（Improved ROW）格式块设备驱动
- * liuhq 2012
- * qrow格式使用ROW解决COW的额外写的开销，同时使用COD解决ROW的文件碎片问题
+/* QROW格式块设备驱动
+ * zyy 2016
  * */
 
 #include "qemu-common.h"
@@ -69,7 +68,7 @@ static int qrow_probe(const uint8_t *buf, int buf_size, const char *filename)
     }
 }
 
-static int qrow_update_map_file(BDRVqrowState *bqrows) {
+static int qrow_update_map_file(BDRVQrowState *bqrows) {
 
 	int ret = 0;
 #ifdef QROW_DEBUG
@@ -95,7 +94,7 @@ end:
 	return ret;
 }
 
-static int qrow_update_img_file(BDRVqrowState *bqrows) {
+static int qrow_update_img_file(BDRVQrowState *bqrows) {
 	QRowMeta meta;
 	int ret = 0;
 	if(bdrv_pread (bqrows->qrow_img_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
@@ -185,7 +184,7 @@ static void qrow_close(BlockDriverState *bs) {
 #endif
 }
 
-static int qrow_open_map_file(BDRVIrowState *bqrows, int flags) {
+static int qrow_open_map_file(BDRVQrowState *bqrows, int flags) {
 
 	int ret = 0;
 #ifdef IROW_DEBUG
@@ -220,8 +219,6 @@ end:
 static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const char *filename, int flags) {
 	int ret = 0;
 	QRowMeta meta;
-
-
 #ifdef IROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_img_file()\n");
 #endif
@@ -631,10 +628,7 @@ static BlockDriverAIOCB *qrow_aio_readv(BlockDriverState *bs,
     if (!acb)
         return NULL;
 	drv = bqrows->qrow_img_file->drv;
-	/*
-		调试不成功可能可以改成
-		acb->irvd_aiocb = drv->bdrv_aio_readv(bqrows->qrow_img_file, bqrows->sector_offset, qiov, nb_sectors, qrow_aio_readv_cb, acb);
-	*/
+	//注意下面的sector_num可能是出错的主要地方
 	acb->irvd_aiocb = drv->bdrv_aio_readv(bqrows->qrow_img_file, sector_num, qiov, nb_sectors, qrow_aio_readv_cb, acb);
 	if(acb->irvd_aiocb == NULL){
 		qemu_aio_release(acb);

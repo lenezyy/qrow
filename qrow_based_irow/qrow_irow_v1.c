@@ -84,7 +84,7 @@ static int qrow_probe(const uint8_t *buf, int buf_size, const char *filename)
     }
 }
 
-static int qrow_update_map_file(BDRVqrowState *bqrows) {
+static int qrow_update_map_file(BDRVQrowState *bqrows) {
 
 	int ret = 0;
 #ifdef QROW_DEBUG
@@ -110,7 +110,7 @@ end:
 	return ret;
 }
 
-static int qrow_update_img_file(BDRVqrowState *bqrows) {
+static int qrow_update_img_file(BDRVQrowState *bqrows) {
 	QRowMeta meta;
 	int ret = 0;
 	if(bdrv_pread (bqrows->qrow_img_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
@@ -200,7 +200,7 @@ static void qrow_close(BlockDriverState *bs) {
 #endif
 }
 
-static int qrow_open_map_file(BDRVIrowState *bqrows, int flags) {
+static int qrow_open_map_file(BDRVQrowState *bqrows, int flags) {
 
 	int ret = 0;
 #ifdef IROW_DEBUG
@@ -379,7 +379,7 @@ fail:
 static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *buf, int nb_sectors) {
 	BDRVQrowState *s = bs->opaque;
 	int64_t nb_clusters, sector_offset;
-	int ret = 1;
+	int ret = 0;
 	
 	if (s->cluster_offset >= s->total_clusters){ //磁盘已满
 		fprintf (stderr, "img is full!\n");
@@ -703,10 +703,6 @@ static BlockDriverAIOCB *qrow_aio_readv(BlockDriverState *bs,
     if (!acb)
         return NULL;
 	drv = bqrows->qrow_img_file->drv;
-	/*
-		调试不成功可能可以改成
-		acb->irvd_aiocb = drv->bdrv_aio_readv(bqrows->qrow_img_file, bqrows->sector_offset, qiov, nb_sectors, qrow_aio_readv_cb, acb);
-	*/
 	acb->irvd_aiocb = drv->bdrv_aio_readv(bqrows->qrow_img_file, sector_num, qiov, nb_sectors, qrow_aio_readv_cb, acb);
 	if(acb->irvd_aiocb == NULL){
 		qemu_aio_release(acb);
