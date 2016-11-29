@@ -1,7 +1,6 @@
 /* QROW格式块设备驱动
  * zyy 2016
  * */
-
 #include "qemu-common.h"
 #include "block_int.h"
 #include "module.h"
@@ -9,7 +8,7 @@
 
 #include <linux/falloc.h>
 
-//#define QROW_DEBUG
+#define QROW_DEBUG
 
 #ifdef QROW_DEBUG
 #define QROW_DEBUG_BEGIN_STR "\n----------------------------------------\n"
@@ -202,7 +201,7 @@ static int qrow_open_map_file(BDRVQrowState *bqrows, int flags) {
 		ret = -1;
 		goto end;
 	}
-	bqrows->map = qemu_malloc(bqrows->map_size*sizeof(uint64_t));
+	bqrows->map = qemu_mallocz(bqrows->map_size*sizeof(uint64_t));
 	if(bdrv_pread(bqrows->qrow_map_file, 0, bqrows->map, bqrows->map_size*sizeof(uint64_t)) != bqrows->map_size*sizeof(uint64_t)) {
 		fprintf(stderr, "Failed to read map_file from %s\n", bqrows->map_file);
 		ret = -1;
@@ -219,13 +218,14 @@ end:
 static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const char *filename, int flags) {
 	int ret = 0;
 	QRowMeta meta;
-#ifdef IROW_DEBUG
+#ifdef 	QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_img_file()\n");
 #endif
 
 	bqrows->qrow_img_file = bdrv_new ("");
 	//用raw的方式打开镜像文件的话，最终调用的就是qemu_open() 里面正常的open()
 	ret = bdrv_file_open(&bqrows->qrow_img_file, filename, flags);
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_img_file() 00\n");
 	if (ret < 0) {
 		fprintf (stderr, "Failed to open %s\n", filename);
 		goto end;
@@ -235,6 +235,7 @@ static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const
 		ret = -1;
 		goto end;
 	}
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_img_file() 00\n");
 	be32_to_cpus(&meta.magic);
 	be32_to_cpus(&meta.version);
 	be64_to_cpus(&meta.total_sectors);
@@ -248,7 +249,7 @@ static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const
 	printf("meta.sector_offset: 0x%\n", meta.sector_offset);
 #endif
 
-	if(meta.magic != IROW_MAGIC || meta.version != IROW_VERSION) {
+	if(meta.magic != QROW_MAGIC || meta.version != QROW_VERSION) {
 		fprintf (stderr, "Invalid magic number or version number!\n");
 		ret = -1;
 		goto end;
@@ -270,11 +271,11 @@ static int qrow_open_img_file(BlockDriverState *bs, BDRVQrowState *bqrows, const
 	*/
 	bqrows->sector_offset = meta.sector_offset;
 	bqrows->byte_offset = bqrows->sector_offset * BDRV_SECTOR_SIZE;
-	bqrows->meta_sector = if(sizeof(meta) % BDRV_SECTOR_SIZE == 0 )? (sizeof(meta) / BDRV_SECTOR_SIZE): (sizeof(meta) / BDRV_SECTOR_SIZE + 1);
+	bqrows->meta_sector = (sizeof(meta) % BDRV_SECTOR_SIZE == 0 )? (sizeof(meta) / BDRV_SECTOR_SIZE): (sizeof(meta) / BDRV_SECTOR_SIZE + 1);
 	bqrows->map_size = meta.disk_size / BDRV_SECTOR_SIZE;
-	bqrows->img_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
+	bqrows->img_file = qemu_mallocz(MAX_FILE_NAME_LENGTH);
 	strncpy(bqrows->img_file, filename, MAX_FILE_NAME_LENGTH);
-	bqrows->map_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
+	bqrows->map_file = qemu_mallocz(MAX_FILE_NAME_LENGTH);
 	strncpy(bqrows->map_file, meta.map_file, MAX_FILE_NAME_LENGTH);
 	strncpy(bs->backing_file, meta.backing_file, sizeof(bs->backing_file));
 	//log_file还没处理的，
@@ -292,21 +293,21 @@ static int qrow_open(BlockDriverState *bs, const char *filename, int flags) {
     BDRVQrowState *s = bs->opaque;
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open()\n");
-	printf("filename: %s, flags: %d\n", filename, flags);
+	//printf("filename: %s, flags: %d\n", filename, flags);
 #endif
 #ifdef QROW_DEBUG_OPEN
 	printf("press Enter to continue...\n");
 	getchar();
 #endif
-
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open() 00\n");
 	s->open_flags = flags;
-	
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open() 01\n");
 	//打开img_file，获取元数据信息
 	if(qrow_open_img_file(bs, s, filename, flags) < 0) {
     	fprintf (stderr, "Failed to open %s\n", filename);
     	goto fail;
     }
-	
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open() 02\n");
 	// 再打开map_file文件
     if(qrow_open_map_file(s, flags) < 0) {
     	goto fail;
@@ -324,6 +325,37 @@ fail:
 	return -1;
 }
 
+static int qrow_read(BlockDriverState *bs, int64_t sector_num, uint8_t *buf, int nb_sectors) {
+	int ret = 0;
+	BDRVQrowState *s = bs->opaque;
+	uint64_t sector_offset;
+	int64_t i = sector_num;
+	int j = 0, k = 0;
+	for (; k < nb_sectors; i++,k++) 
+	{
+		sector_offset = s->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
+		//bqrows->map[i]为0时，要么是表示磁盘镜像的meta元数据占据的第一个sector，要么表示该虚拟扇区的数据为空
+		if(sector_offset < s->meta_sector) //该磁盘内容为空(0)或者为header部分
+		{
+			continue; 
+		} 
+		else
+		{
+		 	if(bdrv_pread(s->qrow_img_file, sector_offset*BDRV_SECTOR_SIZE, buf+j*BDRV_SECTOR_SIZE, BDRV_SECTOR_SIZE) != BDRV_SECTOR_SIZE) {
+				fprintf (stderr, "Failed to read the  data from %s\n", s->img_file);
+				ret = -1;
+				goto end;
+			}
+			j++;				
+		}			
+	}		
+	end:
+#ifdef IROW_DEBUG
+	printf("qrow_read return %d" QROW_DEBUG_END_STR, ret);
+#endif
+	return ret;
+
+}
 static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *buf, int nb_sectors) {
 	BDRVQrowState *s = bs->opaque;
 	int64_t sector_offset;
@@ -345,7 +377,10 @@ static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *b
 		goto end;
 	}
 	sector_offset = s->sector_offset;
-	for (int64_t i = sector_num, j = 1; j <= nb_sectors; i++, j++) //更新map数组的值，即更新虚拟磁盘和物理磁盘的数据映射关系 
+	
+	int64_t i = sector_num;
+	int j = 0;
+	for ( ; j < nb_sectors; i++, j++) //更新map数组的值，即更新虚拟磁盘和物理磁盘的数据映射关系 
 	{
 			s->map[i] = sector_offset;
 			sector_offset++;
@@ -388,6 +423,7 @@ static int qrow_generate_filename(char *dest, const char *prefix, const char *su
 	return 0;
 }
 
+
 static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create()\n");
@@ -395,11 +431,11 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	QRowMeta meta;
 	uint64_t disk_size;
 	char *backing_file = NULL;
-	char *map_file = NULL;
 	uint64_t meta_size;
 	uint64_t sector_offset;
 	int ret = 0;
 	// 解析参数
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 00\n");
 	while (options && options->name) {
 		if (!strcmp(options->name, BLOCK_OPT_SIZE)) {
 				disk_size= options->value.n;
@@ -408,7 +444,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 			} 
 	        options++;
 	}
-	
+//	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 01\n");
 	//判断参数
 	if (disk_size == 0) 
 	{
@@ -421,7 +457,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	   ret = -1;
 	   goto end;
    	} 
-	
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 02\n");
 	// 计算出元数据头需要的所有信息
     memset(&meta, 0, sizeof(meta));
     meta.magic = cpu_to_be32(QROW_MAGIC);	
@@ -429,13 +465,19 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	meta.disk_size = cpu_to_be64(disk_size);
    	meta.total_sectors = cpu_to_be64(disk_size/BDRV_SECTOR_SIZE); // 磁盘镜像总的sector数量
 	meta_size = sizeof(meta);
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 03\n");
 	if( meta_size > 0 )
 	{
-		sector_offset = if(meta_size % BDRV_SECTOR_SIZE == 0) ? (meta_size / BDRV_SECTOR_SIZE) : (meta_size / BDRV_SECTOR_SIZE + 1);
+		sector_offset = (meta_size % BDRV_SECTOR_SIZE == 0) ? (meta_size / BDRV_SECTOR_SIZE) : (meta_size / BDRV_SECTOR_SIZE + 1);
 	}
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 04\n");
 	meta.sector_offset = cpu_to_be64(sector_offset);//元数据存放在镜像的最开始位置 
     strncpy(meta.img_file, filename, MAX_FILE_NAME_LENGTH);
-    strncpy(meta.backing_file, backing_file, MAX_FILE_NAME_LENGTH);//这个具体怎么用？？？ 
+    //printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 05\n");
+    if(backing_file != NULL) {
+   		strncpy(meta.backing_file, backing_file, MAX_FILE_NAME_LENGTH);//这个具体怎么用？？？ 
+   	}
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 055\n");
 	if(qrow_generate_filename(meta.map_file, meta.img_file, "map") < 0) { // map_file文件
    		ret = -1;
    		goto end;
@@ -444,13 +486,16 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	//将元数据写入到镜像文件中 
 	int fd;	
 	fd = open(meta.img_file, O_WRONLY|O_CREAT|O_TRUNC|O_BINARY,0644);
-	
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 06 %d\n",fd);
 	if (fd < 0) 
 	{
 		fprintf(stderr, "Can not open %s\n", meta.img_file);
 		ret = -1;
 		goto end;
 	}
+
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create()  07\n");
+	
 	//下面两个if语句实现了为稀疏文件meta.img_file预分配disk_size大小的空间
 	if(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, disk_size) < 0) {
 		fprintf(stderr, "Can not preallocate disk space for %s\n", meta.img_file);
@@ -476,13 +521,13 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
    		ret = -1;
 		goto end;
    	}
-	
+
 	//创建并初始化map_file文件
 	int map_file_fd;
 	
 	uint64_t *map = NULL;
 	uint64_t map_size = disk_size/BDRV_SECTOR_SIZE;
-	map = qemu_malloc(map_size*sizeof(uint64_t));
+	map = qemu_mallocz(map_size*sizeof(uint64_t));
 	memset(map, 0, map_size*sizeof(uint64_t));
 	map_file_fd = open(meta.map_file, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
    	if(fd < 0) {
@@ -542,7 +587,7 @@ static AIOPool qrow_aio_pool = {
 };
 
 
-static qrowAIOCB *qrow_aio_setup(BlockDriverState *bs,
+static QRowAIOCB* qrow_aio_setup(BlockDriverState *bs,
         int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
         BlockDriverCompletionFunc *cb, void *opaque)
 {
@@ -572,9 +617,11 @@ static void qrow_aio_readv_cb(void *opaque, int ret) {
 		goto end;
 	}
 	uint64_t sector_offset;
-	buf = qemu_malloc(acb->qiov->size);
+	buf = qemu_mallocz(acb->qiov->size);
 	qemu_iovec_to_buffer(acb->qiov, buf);
-	for (int64_t i = acb->sector_num, j = 0; i < (acb->nb_sectors + acb->sector_num); i++) 
+	int64_t i = acb->sector_num;
+	int j = 0, k = 0;
+	for (; k < acb->nb_sectors; i++,k++)  
 	{
 		sector_offset = bqrows->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
 		//bqrows->map[i]为0时，要么是表示磁盘镜像的meta元数据占据的第一个sector，要么表示该虚拟扇区的数据为空
@@ -674,7 +721,10 @@ static BlockDriverAIOCB *qrow_aio_writev(BlockDriverState *bs,
 	}
 	//更新map缓存
 	sector_offset = s->sector_offset;
-	for (int64_t i = sector_num, j = 1; j <= nb_sectors; i++, j++) //更新map数组的值，即更新虚拟磁盘和物理磁盘的数据映射关系 
+	int64_t i = sector_num;
+	int j = 0;
+	//for (int j = 0; j < nb_sectors; i++, j++) //更新map数组的值，即更新虚拟磁盘和物理磁盘的数据映射关系 
+	for (; j < nb_sectors; i++, j++)//在linux中编译时说不能在for中进行初始化 
 	{
 			s->map[i] = sector_offset;
 			sector_offset++;
@@ -731,7 +781,7 @@ static int qrow_get_info(BlockDriverState *bs, BlockDriverInfo *bdi) {
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_get_info()\n");
 #endif
-	BDRVQrowState *s = bs->opaque;
+	//BDRVQrowState *s = bs->opaque;
 	//bdi->cluster_size = s->cluster_size;
 	//bdi->vm_state_offset = qrow_vm_state_offset(s);
 #ifdef QROW_DEBUG
