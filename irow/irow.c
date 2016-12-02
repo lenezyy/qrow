@@ -7,7 +7,6 @@
 #include "block_int.h"
 #include "module.h"
 #include "block/irow.h"
-#include "qemu-os-posix.h"
 #include <linux/falloc.h>
 
 BDRVIrowState **birows_cache = NULL; // 用于保存打开的father
@@ -2381,7 +2380,7 @@ static void irow_aio_readv_cb(void *opaque, int ret) {
 			qemu_iovec_from_buffer(acb->qiov, buf, acb->qiov->size);
 		}
 
-	end:
+end:
 		if(buf != NULL) {
 			qemu_free(buf);
 			buf = NULL;

@@ -4,7 +4,8 @@
 #include "qemu-common.h"
 #include "block_int.h"
 #include "module.h"
-#include "block/qrow_v3.h"
+#include "block/qrow_v4.h"
+
 #include <linux/falloc.h>
 
 //#define QROW_DEBUG
@@ -19,10 +20,10 @@
 
 //#define QROW_DEBUG_OPEN
 //#define QROW_DEBUG_SET_BIT
-//#define QROW_DEBUG_ASSERT_CLUSTERS
+#define QROW_DEBUG_ASSERT_CLUSTERS
 //#define QROW_DEBUG_SNAPSHOT_DELETE
 //#define QROW_DEBUG_READ
-//#define QROW_DEBUG_WRITE
+#define QROW_DEBUG_WRITE
 //#define QROW_DEBUG_AIO_READV
 //#define QROW_DEBUG_AIO_WRITEV
 
@@ -261,8 +262,10 @@ static int qrow_open_meta_file(BlockDriverState *bs, BDRVQrowState *bqrows, cons
 #endif
 
 	bqrows->qrow_meta_file = bdrv_new ("");
+
 	//用raw的方式打开镜像文件的话，最终调用的就是qemu_open() 里面正常的open()
 	ret = bdrv_file_open(&bqrows->qrow_meta_file, filename, flags);
+
 	if (ret < 0) {
 		fprintf (stderr, "Failed to open %s\n", filename);
 		goto end;
@@ -272,6 +275,7 @@ static int qrow_open_meta_file(BlockDriverState *bs, BDRVQrowState *bqrows, cons
 		ret = -1;
 		goto end;
 	}
+
 	be32_to_cpus(&meta.magic);
 	be32_to_cpus(&meta.version);
 	be64_to_cpus(&meta.total_sectors);
@@ -330,18 +334,21 @@ static int qrow_open(BlockDriverState *bs, const char *filename, int flags) {
     BDRVQrowState *s = bs->opaque;
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open()\n");
+	//printf("filename: %s, flags: %d\n", filename, flags);
 #endif
 #ifdef QROW_DEBUG_OPEN
 	printf("press Enter to continue...\n");
 	getchar();
 #endif
+	
 	s->open_flags = flags;
-
+	
 	//打开meta_file，获取元数据信息
 	if(qrow_open_meta_file(bs, s, filename, flags) < 0) {
     	fprintf (stderr, "Failed to open %s\n", filename);
     	goto fail;
     }
+	
 	// 再打开map_file文件
     if(qrow_open_map_file(s, flags) < 0) {
     	goto fail;
@@ -363,38 +370,174 @@ fail:
 	qrow_close (bs);
 	return -1;
 }
-
-static int qrow_read(BlockDriverState *bs, int64_t sector_num, uint8_t *buf, int nb_sectors) {
+static int bubbleSort(int64_t* arr, int len)
+{
 	int ret = 0;
-	BDRVQrowState *s = bs->opaque;
-	uint64_t sector_offset;
-	int64_t i = sector_num;
-	int j = 0, k = 0;
-	for (; k < nb_sectors; i++,k++) 
-	{
-		sector_offset = s->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
-		//bqrows->map[i]为0时，要么是表示磁盘镜像的meta元数据占据的第一个sector，要么表示该虚拟扇区的数据为空
-		if(sector_offset == 0) //该磁盘内容为空(0)或者为header部分
-		{
-			continue; 
-		} 
-		else
-		{
-		 	if(bdrv_pread(s->qrow_data_file, sector_offset*BDRV_SECTOR_SIZE, buf+j*BDRV_SECTOR_SIZE, BDRV_SECTOR_SIZE) != BDRV_SECTOR_SIZE) {
-				fprintf (stderr, "Failed to read the  data from %s\n", s->data_file);
-				ret = -1;
-				goto end;
-			}
-			j++;				
-		}			
-	}		
-end:
+    int i = 0; 
+    int flag = 0;
+    for (; i < len; i++)
+    {
+        flag = 0; //如果一趟比较下来，没有元素交换位置，证明数组已经排好序了，不用再进行后续的比较
+        int j = 0;
+        for (; j < len - i -1; j++)
+        {
+            if (arr[j] > arr[j+1])
+            {
+                int64_t tmp = arr[j];
+                arr[j] = arr[j+1];
+                arr[j+1] = tmp;
+                flag = 1;
+            }
+        }
+        if (flag == 0)
+        {
+            break;
+        }
+    }
+    ret = i;
 #ifdef IROW_DEBUG
-	printf("qrow_read return %d" QROW_DEBUG_END_STR, ret);
+	printf("bubbleSort" QROW_DEBUG_END_STR, ret);
 #endif
 	return ret;
 
 }
+static int find_index(int64_t* arr, int64_t sector_num, int len)
+{
+	int left = 0, right = len - 1, mid = 0;
+    mid = ( left + right ) / 2;
+    while( left < right && arr[mid] != sector_num )
+    {
+        if( arr[mid] < sector_num )
+        left = mid + 1;
+        else if( arr[mid] > sector_num )
+        right = mid - 1;
+        mid = ( left + right ) / 2;
+    }
+    if( arr[mid] == sector_num )   
+	{
+		return mid;
+	}
+   
+	return -1;
+}
+
+static int qrow_read(BlockDriverState *bs, int64_t sector_num, uint8_t *buf, int nb_sectors) {
+	int ret = 0;
+	BDRVQrowState *s = bs->opaque;
+	uint8_t *temp_buf = NULL;
+	temp_buf = qemu_mallocz(nb_sectors*BDRV_SECTOR_SIZE);
+	int64_t  *temp_map = NULL;
+	temp_map = qemu_mallocz(nb_sectors*sizeof(int64_t));
+	memset(temp_map, 0, nb_sectors*sizeof(int64_t));
+	int64_t sector_offset;
+	int64_t i = sector_num;
+	int j = 0;
+	for (; j < nb_sectors; i++,j++) 
+	{
+		sector_offset = s->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
+		temp_map[j] = sector_offset;
+	}
+ 	bubbleSort(temp_map,nb_sectors);//给 temp_map排序，增序
+	 
+	//按照增序temp_map读取数据到 temp_buf中 
+	int k = 1,len = 0, start_index = 0;
+	uint64_t start_sector_offset = temp_map[0];	
+	for (; k < nb_sectors; k++) 
+		{
+			
+			if ((temp_map[k] - temp_map[k-1]) == 1)
+			{
+				continue; 
+			}
+			else
+			{
+				len = k - start_index;
+				if(bdrv_pread(s->qrow_data_file, start_sector_offset*BDRV_SECTOR_SIZE, temp_buf+start_index*BDRV_SECTOR_SIZE, len*BDRV_SECTOR_SIZE) != len*BDRV_SECTOR_SIZE) {
+					fprintf (stderr, "Failed to read the  data from %s\n", s->data_file);
+					ret= -1;
+					goto end;
+				}
+				start_index = k;
+				start_sector_offset = temp_map[k];
+			}
+		}
+	
+		len = k - start_index;
+		if(bdrv_pread(s->qrow_data_file, start_sector_offset*BDRV_SECTOR_SIZE, temp_buf+start_index*BDRV_SECTOR_SIZE, len*BDRV_SECTOR_SIZE) != len*BDRV_SECTOR_SIZE) {
+			fprintf (stderr, "Failed to read the  data from %s\n", s->data_file);
+			ret= -1;
+			goto end;
+		}
+		
+	//按照map原来的顺序，把temp_map中的数据复制到buf中 
+	int64_t x = sector_num;
+	int y = 0;
+	int buf_strat_index = 0,tmp_buf_start_index = 0;
+	int tmp_len = 0;
+	while(x < (nb_sectors+sector_num))
+	{
+		if(y < nb_sectors)
+		{
+	
+			if(s->map[x] == temp_map[y])
+			{
+				tmp_len++;
+				x++;
+				y++;
+			}
+			else
+			{
+				memcpy(buf+buf_strat_index*BDRV_SECTOR_SIZE,temp_buf+tmp_buf_start_index*BDRV_SECTOR_SIZE,tmp_len*BDRV_SECTOR_SIZE);
+				y = find_index(temp_map,s->map[x],nb_sectors);
+				if (y < 0)
+				{
+					fprintf (stderr, "Failed to find \n");
+					ret= -1;
+					goto end;
+				}
+				buf_strat_index += tmp_len;
+				tmp_buf_start_index = y;
+				x++;
+				y++;
+				tmp_len = 1;		
+			}
+		}
+		else 
+		{
+			memcpy(buf+buf_strat_index*BDRV_SECTOR_SIZE,temp_buf+tmp_buf_start_index*BDRV_SECTOR_SIZE,tmp_len*BDRV_SECTOR_SIZE);
+			y = find_index(temp_map,s->map[x],nb_sectors);
+			if (y < 0)
+			{
+				fprintf (stderr, "Failed to find \n");
+				ret= -1;
+				goto end;
+			}
+			buf_strat_index += tmp_len;
+			tmp_buf_start_index = y;
+			x++;
+			y++;
+			tmp_len = 1;		
+		}	
+		
+	}
+	memcpy(buf+buf_strat_index*BDRV_SECTOR_SIZE,temp_buf+tmp_buf_start_index*BDRV_SECTOR_SIZE,tmp_len*BDRV_SECTOR_SIZE);		
+end:
+#ifdef IROW_DEBUG
+	printf("qrow_read return %d" QROW_DEBUG_END_STR, ret);
+#endif
+	if(temp_buf != NULL) {
+			qemu_free(temp_buf);
+			temp_buf = NULL;
+		}
+	if(temp_map != NULL) {
+		qemu_free(temp_map);
+		temp_map = NULL;
+	}
+	return ret;
+
+}
+
+
 static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *buf, int nb_sectors) {
 	BDRVQrowState *s = bs->opaque;
 	int64_t sector_offset;
@@ -514,6 +657,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	//将元数据写入到meta文件中 
 	int fd;	
 	fd = open(meta.meta_file, O_WRONLY|O_CREAT|O_TRUNC|O_BINARY,0644);
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create() 06 %d\n",fd);
 	if (fd < 0) 
 	{
 		fprintf(stderr, "Can not open %s\n", meta.meta_file);
@@ -521,6 +665,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 		goto end;
 	}
 
+	//printf(QROW_DEBUG_BEGIN_STR "We are in qrow_create()  07\n");
 	
 	uint64_t writeByets = write(fd, &meta, sizeof(meta)); 
 	if(writeByets != sizeof(meta))
@@ -539,7 +684,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	//创建并初始化map_file文件
 	int map_file_fd;
 	
-	uint64_t *map = NULL;
+	int64_t *map = NULL;
 	uint64_t map_size = disk_size/BDRV_SECTOR_SIZE;
 	map = qemu_mallocz(map_size*sizeof(uint64_t));
 	memset(map, 0, map_size*sizeof(uint64_t));
@@ -557,7 +702,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 		goto end;
 	}
 	
-	//创建并data_file文件
+	//创建并data_file文件稀疏文件  方案一 
 	int data_file_fd;
 	data_file_fd = open(meta.data_file, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
    	if(data_file_fd < 0) {
@@ -565,6 +710,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 		ret = -1;
 		goto end;
 	}
+	
 	if(fallocate(data_file_fd, FALLOC_FL_KEEP_SIZE, 0, disk_size) < 0) {
 		;//fprintf(stderr, "Can not preallocate disk space for %s\n(Preallocation is not supported on ext3)\n", cs->irvd_file);
 	}
@@ -572,7 +718,7 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 		fprintf(stderr, "Can not truncate %s to %" PRId64 " bytes\n", meta.data_file, disk_size);
 		ret = -1;
 	}
-	
+
 	if(close(data_file_fd) != 0) {
 		fprintf(stderr, "Can not close %s\n", meta.data_file);
 		ret = -1;
@@ -581,6 +727,8 @@ static int qrow_create(const char *filename, QEMUOptionParameter *options) {
 	
 	// 创建并data_file文件稀疏文件  方案二
 	//bdrv_create_file(meta.data_file, options); 
+	
+	
 	
 end:
 #ifdef QROW_DEBUG
@@ -656,34 +804,117 @@ static void qrow_aio_readv_cb(void *opaque, int ret) {
 		fprintf(stderr, "aio_readv failed\n");
 		goto end;
 	}
-	uint64_t sector_offset;
 	buf = qemu_mallocz(acb->qiov->size);
 	qemu_iovec_to_buffer(acb->qiov, buf);
+	
+	
+	
+	uint8_t *temp_buf = NULL;
+	temp_buf = qemu_mallocz(acb->qiov->size);
+	int64_t  *temp_map = NULL;
+	temp_map = qemu_mallocz(acb->nb_sectors*sizeof(int64_t));
+	memset(temp_map, 0, acb->nb_sectors*sizeof(int64_t));
+	int64_t sector_offset;
 	int64_t i = acb->sector_num;
-	int j = 0, k = 0;
-	for (; k < acb->nb_sectors; i++,k++)  
+	int j = 0;
+	for (; j < acb->nb_sectors; i++,j++) 
 	{
 		sector_offset = bqrows->map[i];//从map数组中获取数据在物理磁盘上的存储扇区号
-		//bqrows->map[i]为0时，要么是表示磁盘镜像的meta元数据占据的第一个sector，要么表示该虚拟扇区的数据为空
-		if(sector_offset == 0) //该磁盘内容为空(0)
+		temp_map[j] = sector_offset;
+	}
+ 	bubbleSort(temp_map,acb->nb_sectors);//给 temp_map排序，增序
+	 
+	//按照增序temp_map读取数据到 temp_buf中 
+	int k = 1,len = 0, start_index = 0;
+	uint64_t start_sector_offset = temp_map[0];	
+	for (; k < acb->nb_sectors; k++) 
 		{
-			continue; 
-		} 
-		else
+			
+			if ((temp_map[k] - temp_map[k-1]) == 1)
+			{
+				continue; 
+			}
+			else
+			{
+				len = k - start_index;
+				if(bdrv_pread(bqrows->qrow_data_file, start_sector_offset*BDRV_SECTOR_SIZE, temp_buf+start_index*BDRV_SECTOR_SIZE, len*BDRV_SECTOR_SIZE) != len*BDRV_SECTOR_SIZE) {
+					fprintf (stderr, "Failed to read the  data from %s\n", bqrows->data_file);
+					goto end;
+				}
+				start_index = k;
+				start_sector_offset = temp_map[k];
+			}
+		}
+	
+		len = k - start_index;
+		if(bdrv_pread(bqrows->qrow_data_file, start_sector_offset*BDRV_SECTOR_SIZE, temp_buf+start_index*BDRV_SECTOR_SIZE, len*BDRV_SECTOR_SIZE) != len*BDRV_SECTOR_SIZE) {
+			fprintf (stderr, "Failed to read the  data from %s\n", bqrows->data_file);
+			goto end;
+		}
+		
+	//按照map原来的顺序，把temp_map中的数据复制到buf中 
+	int64_t x = acb->sector_num;
+	int y = 0;
+	int buf_strat_index = 0,tmp_buf_start_index = 0;
+	int tmp_len = 0;
+	while(x < (acb->nb_sectors+acb->sector_num))
+	{
+		if(y < acb->nb_sectors)
 		{
-		 	if(bdrv_pread(bqrows->qrow_data_file, sector_offset*BDRV_SECTOR_SIZE, buf+j*BDRV_SECTOR_SIZE, BDRV_SECTOR_SIZE) != BDRV_SECTOR_SIZE) {
-				fprintf (stderr, "Failed to read the  data from %s\n", bqrows->data_file);
-				ret = -1;
+	
+			if(bqrows->map[x] == temp_map[y])
+			{
+				tmp_len++;
+				x++;
+				y++;
+			}
+			else
+			{
+				memcpy(buf+buf_strat_index*BDRV_SECTOR_SIZE,temp_buf+tmp_buf_start_index*BDRV_SECTOR_SIZE,tmp_len*BDRV_SECTOR_SIZE);
+				y = find_index(temp_map,bqrows->map[x],acb->nb_sectors);
+				if (y < 0)
+				{
+					fprintf (stderr, "Failed to find \n");
+					goto end;
+				}
+				buf_strat_index += tmp_len;
+				tmp_buf_start_index = y;
+				x++;
+				y++;
+				tmp_len = 1;		
+			}
+		}
+		else 
+		{
+			memcpy(buf+buf_strat_index*BDRV_SECTOR_SIZE,temp_buf+tmp_buf_start_index*BDRV_SECTOR_SIZE,tmp_len*BDRV_SECTOR_SIZE);
+			y = find_index(temp_map,bqrows->map[x],acb->nb_sectors);
+			if (y < 0)
+			{
+				fprintf (stderr, "Failed to find \n");
 				goto end;
 			}
-			j++;				
-		}				
-	}		
+			buf_strat_index += tmp_len;
+			tmp_buf_start_index = y;
+			x++;
+			y++;
+			tmp_len = 1;		
+		}	
+		
+	}
+	memcpy(buf+buf_strat_index*BDRV_SECTOR_SIZE,temp_buf+tmp_buf_start_index*BDRV_SECTOR_SIZE,tmp_len*BDRV_SECTOR_SIZE);
 	qemu_iovec_from_buffer(acb->qiov, buf, acb->qiov->size);		
 end:
 		if(buf != NULL) {
 			qemu_free(buf);
 			buf = NULL;
+		}
+		if(temp_buf != NULL) {
+			qemu_free(temp_buf);
+			temp_buf = NULL;
+		}
+		if(temp_map != NULL) {
+			qemu_free(temp_map);
+			temp_map = NULL;
 		}
 	    acb->common.cb(acb->common.opaque, ret);
 	    qemu_aio_release(acb);
