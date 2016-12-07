@@ -93,18 +93,17 @@ end:
 	return ret;
 }
 
-static int qrow_update_meta_file(BlockDriverState *bs) {
-	BDRVQrowState *s = bs->opaque;
+static int qrow_update_meta_file(BDRVQrowState *bqrows) {
 	QRowMeta meta;
 	int ret = 0;
-	if (bdrv_pread (bs->file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
-			fprintf (stderr, "Failed to read the meta data \n");
+	if(bdrv_pread (bqrows->qrow_meta_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
+			fprintf (stderr, "Failed to read the meta data from %s\n", bqrows->meta_file);
 			ret = -1;
 			goto end;
 	}
-	meta.sector_offset = cpu_to_be64(s->sector_offset);
-	if(bdrv_pwrite(bs->file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
-		fprintf (stderr, "Failed to write the meta data \n");
+	meta.sector_offset = cpu_to_be64(bqrows->sector_offset);
+	if(bdrv_pwrite(bqrows->qrow_meta_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
+		fprintf (stderr, "Failed to write the meta data to %s\n", bqrows->meta_file);
 		ret = -1;
 		goto end;
 	}
@@ -255,30 +254,39 @@ end:
 #endif
 	return ret;
 }
-static int qrow_open_meta_file(BlockDriverState *bs, BDRVQrowState *bqrows,int flags) {
+static int qrow_open_meta_file(BlockDriverState *bs, BDRVQrowState *bqrows, const char *filename, int flags) {
 	int ret = 0;
 	QRowMeta meta;
 #ifdef 	QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_meta_file()\n");
 #endif
 
-	if (bdrv_pread (bs->file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
-		fprintf (stderr, "Failed to read the QROW meta data \n");
+	bqrows->qrow_meta_file = bdrv_new ("");
+
+	//用raw的方式打开镜像文件的话，最终调用的就是qemu_open() 里面正常的open()
+	ret = bdrv_file_open(&bqrows->qrow_meta_file, filename, flags);
+
+	if (ret < 0) {
+		fprintf (stderr, "Failed to open %s\n", filename);
+		goto end;
+	}
+	if (bdrv_pread (bqrows->qrow_meta_file, 0, &meta, sizeof(meta)) != sizeof(meta)) {
+		fprintf (stderr, "Failed to read the QROW meta data from %s\n", filename);
 		ret = -1;
 		goto end;
 	}
+
 	be32_to_cpus(&meta.magic);
 	be32_to_cpus(&meta.version);
 	be64_to_cpus(&meta.total_sectors);
 	be64_to_cpus(&meta.disk_size);
 	be64_to_cpus(&meta.sector_offset);
-	
 #ifdef IROW_DEBUG_DETAIL
 	printf("meta.magic: %x\n", meta.magic);
 	printf("meta.version: %x\n", meta.version);
 	printf("meta.total_sectors: 0x%" PRIx64 "(%" PRId64 ")\n", meta.total_sectors, meta.total_sectors);
 	printf("meta.disk_size: 0x%" PRIx64 "(%" PRId64 "M)\n", meta.disk_size, meta.disk_size / (1024 * 1024));
-	printf("meta.sector_offset: %x\n", meta.sector_offset);
+	printf("meta.sector_offset: 0x%\n", meta.sector_offset);
 #endif
 
 	if(meta.magic != QROW_MAGIC || meta.version != QROW_VERSION) {
@@ -301,21 +309,18 @@ static int qrow_open_meta_file(BlockDriverState *bs, BDRVQrowState *bqrows,int f
 	uint64_t cur_cluster_offset = (cur_disk_size % s->cluster_size == 0) ? (cur_disk_size / s->cluster_size) : (cur_disk_size / s->cluster_size+1);
 	s->cluster_offset = (s->cluster_offset < cur_cluster_offset) ? cur_cluster_offset : s->cluster_offset;
 	*/
-	
 	bqrows->sector_offset = meta.sector_offset;
 	bqrows->byte_offset = bqrows->sector_offset * BDRV_SECTOR_SIZE;
 	bqrows->map_size = meta.disk_size / BDRV_SECTOR_SIZE;
-	bqrows->meta_file = NULL;
-	bqrows->meta_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
-	pstrcpy(bqrows->meta_file, MAX_FILE_NAME_LENGTH, meta.meta_file);
-	bqrows->map_file = NULL;
-	bqrows->map_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
-	pstrcpy(bqrows->map_file, MAX_FILE_NAME_LENGTH, meta.map_file);
-	bqrows->data_file = NULL;
-	bqrows->data_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
-	pstrcpy(bqrows->data_file, MAX_FILE_NAME_LENGTH, meta.data_file);
-	pstrcpy(bs->backing_file, sizeof(bs->backing_file),meta.backing_file);
+	bqrows->meta_file = qemu_mallocz(MAX_FILE_NAME_LENGTH);
+	strncpy(bqrows->meta_file, filename, MAX_FILE_NAME_LENGTH);
+	bqrows->map_file = qemu_mallocz(MAX_FILE_NAME_LENGTH);
+	strncpy(bqrows->map_file, meta.map_file, MAX_FILE_NAME_LENGTH);
+	bqrows->data_file = qemu_mallocz(MAX_FILE_NAME_LENGTH);
+	strncpy(bqrows->data_file, meta.data_file, MAX_FILE_NAME_LENGTH);
+	strncpy(bs->backing_file, meta.backing_file, sizeof(bs->backing_file));
 	//log_file还没处理的，
+	
 #ifdef QROW_DEBUG
 	printf("backing_file \"%s\"\n", bs->backing_file);
 #endif
@@ -325,7 +330,7 @@ end:
 #endif
 	return ret;
 }
-static int qrow_open(BlockDriverState *bs, int flags) {
+static int qrow_open(BlockDriverState *bs, const char *filename, int flags) {
     BDRVQrowState *s = bs->opaque;
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open()\n");
@@ -337,24 +342,22 @@ static int qrow_open(BlockDriverState *bs, int flags) {
 #endif
 	
 	s->open_flags = flags;
+	
 	//打开meta_file，获取元数据信息
-	if(qrow_open_meta_file(bs,s,flags) < 0) {
-    	fprintf (stderr, "Failed to open img\n");
+	if(qrow_open_meta_file(bs, s, filename, flags) < 0) {
+    	fprintf (stderr, "Failed to open %s\n", filename);
     	goto fail;
     }
-
+	
 	// 再打开map_file文件
     if(qrow_open_map_file(s, flags) < 0) {
     	goto fail;
     }
     
-    
     // 再打开data_file文件
     if(qrow_open_data_file(s, flags) < 0) {
     	goto fail;
     }
-    
-    
 #ifdef QROW_DEBUG 
     printf("qrow_open return 0" QROW_DEBUG_END_STR);
 #endif
@@ -454,6 +457,7 @@ static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *b
 	BDRVQrowState *s = bs->opaque;
 	int64_t sector_offset;
 	int ret = 0;
+	
 	if (s->sector_offset >= s->total_sectors){ //磁盘已满
 		fprintf (stderr, "img is full!\n");
 		ret = -1;
@@ -485,15 +489,16 @@ static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *b
 		ret = -1;
 		goto end;
 	}
+	
 	s->sector_offset += nb_sectors;
 	s->byte_offset = s->sector_offset * BDRV_SECTOR_SIZE;
-	
 	// 更新meta_file文件里面的meta关于offset的值
-	if(qrow_update_meta_file(bs) < 0) {
+	if(qrow_update_meta_file(s) < 0) {
 		fprintf (stderr, "Failed to update meta_file. (%s)\n", s->meta_file);
 		ret = -1;
 		goto end;
 	}
+
 end:
 	
 #ifdef QROW_DEBUG
@@ -858,7 +863,7 @@ static BlockDriverAIOCB *qrow_aio_writev(BlockDriverState *bs,
 	s->sector_offset += nb_sectors;
 	s->byte_offset = s->sector_offset * BDRV_SECTOR_SIZE;
 	// 更新meta_file文件里面的meta关于offset的值
-	if(qrow_update_meta_file(bs) < 0) {
+	if(qrow_update_meta_file(s) < 0) {
 		fprintf (stderr, "Failed to update meta_file. (%s)\n", s->meta_file);
 		goto end;
 	}

@@ -4,7 +4,7 @@
 #include "qemu-common.h"
 #include "block_int.h"
 #include "module.h"
-#include "block/qrow_v5.h"
+#include "block/qrow_v6.h"
 
 #include <linux/falloc.h>
 
