@@ -1,0 +1,11 @@
+--- hw/ide/pci.c	2011-02-22 19:04:38.000000000 +0530
++++ hw/ide/pci.c	2012-10-04 14:47:52.862973595 +0530
+@@ -266,7 +266,7 @@
+         qemu_set_irq(bm->irq, level);
+         return;
+     }
+-
++	
+     bm->status |= BM_STATUS_INT;
+ 
+     /* trigger the real irq */

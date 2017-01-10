@@ -1,0 +1,139 @@
+--- hw/eepro100.c	2011-02-22 19:04:38.000000000 +0530
++++ hw/eepro100.c	2012-09-28 18:34:22.174504431 +0530
+@@ -48,6 +48,17 @@
+ #include "eeprom93xx.h"
+ #include "sysemu.h"
+ 
++
++// kvm rr
++#ifndef __user
++#define __user
++#endif
++
++#include <linux/kvm.h>
++#include "kvm_rr.h"
++
++
++// end kvm rr
+ #define KiB 1024
+ 
+ /* Debug EEPRO100 card. */
+@@ -796,7 +807,13 @@
+         }
+     }
+     TRACE(RXTX, logout("%p sending frame, len=%d,%s\n", s, size, nic_dump(buf, size)));
+-    qemu_send_packet(&s->nic->nc, buf, size);
++
++	// kvm rr
++	if(!kvm_replaying())
++	{
++		 qemu_send_packet(&s->nic->nc, buf, size);
++	}
++	// end kvm rr
+     s->statistics.tx_good_frames++;
+     /* Transmit with bad status would raise an CX/TNO interrupt.
+      * (82557 only). Emulation never has bad status. */
+@@ -915,6 +932,10 @@
+ 
+ static void eepro100_cu_command(EEPRO100State * s, uint8_t val)
+ {
++
++	// kvm rr
++	struct kvm_rr_rec_request req;
++	// end kvm rr
+     cu_state_t cu_state;
+     switch (val) {
+     case CU_NOP:
+@@ -957,6 +978,16 @@
+         TRACE(OTHER, logout("val=0x%02x (dump stats)\n", val));
+         dump_statistics(s);
+         stl_le_phys(s->statsaddr + s->stats_size, 0xa005);
++	// kvm rr
++	if(kvm_recording())
++	{
++		req.gpa = s->statsaddr;
++		req.size = s->stats_size+4; //+ 4 for status
++		req.req_type = REC_TYPE_NW_STAT;
++		ioctl(kvm_get_vmfd(), KVM_RR_REC_REQUEST, &req);
++	}
++	// end kvm rr
++		
+         break;
+     case CU_CMD_BASE:
+         /* Load CU base. */
+@@ -968,6 +999,16 @@
+         TRACE(OTHER, logout("val=0x%02x (dump stats and reset)\n", val));
+         dump_statistics(s);
+         stl_le_phys(s->statsaddr + s->stats_size, 0xa007);
++	// kvm rr
++	if(kvm_recording())
++	{
++		req.gpa = s->statsaddr;
++		req.size = s->stats_size+4; //+ 4 for status
++		req.req_type = REC_TYPE_NW_STAT;
++		ioctl(kvm_get_vmfd(), KVM_RR_REC_REQUEST, &req);
++	}
++	// end kvm rr
++
+         memset(&s->statistics, 0, sizeof(s->statistics));
+         break;
+     case CU_SRESUME:
+@@ -1645,14 +1686,32 @@
+ #endif
+ }
+ 
++
+ static ssize_t nic_receive(VLANClientState *nc, const uint8_t * buf, size_t size)
+ {
+     /* TODO:
+      * - Magic packets should set bit 30 in power management driver register.
+      * - Interesting packets should set bit 29 in power management driver register.
+      */
++
+     EEPRO100State *s = DO_UPCAST(NICState, nc, nc)->opaque;
+-    uint16_t rfd_status = 0xa000;
++	// kvm rr
++	uint16_t rfd_status;
++	struct kvm_rr_rec_request req;
++	if(kvm_recording())
++	{
++		// remove the complete bit,
++		// which will be set when the pkt is recorded
++		rfd_status = 0x2000;
++	}
++	else if(kvm_replaying())
++	{
++		return size;
++	}
++	else
++		rfd_status = 0xa000;
++	// end kvm rr
++
+     static const uint8_t broadcast_macaddr[6] =
+         { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+ 
+@@ -1765,8 +1824,24 @@
+ #if 0
+     assert(!(s->configuration[17] & BIT(0)));
+ #endif
++//	printf("RX base %x off %x hdr off %x size %d sts %x\n",s->ru_base,s->ru_offset,\
++			offsetof(eepro100_rx_t,packet),size,rfd_status);
++
+     cpu_physical_memory_write(s->ru_base + s->ru_offset +
+                               offsetof(eepro100_rx_t, packet), buf, size);
++
++	// kvm rr
++	// record request for this pkt
++	if(kvm_recording())
++	{
++		req.gpa = s->ru_base+s->ru_offset;
++		req.size = offsetof(eepro100_rx_t,packet)+size;
++		req.req_type = REC_TYPE_RX_PKT;
++		
++		ioctl(kvm_get_vmfd(), KVM_RR_REC_REQUEST, &req);
++	}
++	// end kvm rr 
++
+     s->statistics.rx_good_frames++;
+     eepro100_fr_interrupt(s);
+     s->ru_offset = le32_to_cpu(rx.link);

@@ -1,0 +1,61 @@
+--- hw/ide/core.c	2012-09-12 15:15:38.279547145 +0530
++++ hw/ide/core.c	2012-10-06 16:16:16.456417144 +0530
+@@ -30,8 +30,9 @@
+ #include "qemu-timer.h"
+ #include "sysemu.h"
+ #include "dma.h"
++#include "pci.h"
+ #include "blockdev.h"
+-
++#include <time.h>
+ #include <hw/ide/internal.h>
+ 
+ static const int smart_attributes[][5] = {
+@@ -133,8 +134,12 @@
+         put_le16(p + 59, 0x100 | s->mult_sectors);
+     put_le16(p + 60, s->nb_sectors);
+     put_le16(p + 61, s->nb_sectors >> 16);
++	// kvm rr
+     put_le16(p + 62, 0x07); /* single word dma0-2 supported */
+     put_le16(p + 63, 0x07); /* mdma0-2 supported */
++    //put_le16(p + 62, 0x00); /* single word dma0-2 supported */
++    //put_le16(p + 63, 0x00); /* mdma0-2 supported */
++    // end kvm rr
+     put_le16(p + 64, 0x03); /* pio3-4 supported */
+     put_le16(p + 65, 120);
+     put_le16(p + 66, 120);
+@@ -508,6 +513,14 @@
+     /* end of transfer ? */
+     if (s->nsector == 0) {
+         s->status = READY_STAT | SEEK_STAT;
++	// kvm rr
++	if(kvm_recording() || kvm_replaying())
++	{
++    		BMDMAState *bm = DO_UPCAST(BMDMAState, dma, s->bus->dma);
++		qemu_incr_irq_count(bm->irq);
++	}
++	// end kvm rr
++	
+         ide_set_irq(s->bus);
+         goto eot;
+     }
+@@ -520,8 +533,8 @@
+         goto eot;
+ 
+ #ifdef DEBUG_AIO
+-    printf("ide_dma_cb: sector_num=%" PRId64 " n=%d, is_read=%d\n",
+-           sector_num, n, s->is_read);
++    printf("ide_dma_cb: sector_num=%" PRId64 " n=%d, is_read=%d %x\n",
++           sector_num, n, s->is_read,s->bus->irq);
+ #endif
+ 
+     if (s->is_read) {
+@@ -1873,7 +1886,7 @@
+ 		uint8_t val = s->nsector & 0x07;
+             uint16_t *identify_data = (uint16_t *)s->identify_data;
+ 
+-		switch (s->nsector >> 3) {
++		switch (s->nsector >> 3){
+ 		case 0x00: /* pio default */
+ 		case 0x01: /* pio mode */
+ 			put_le16(identify_data + 62,0x07);

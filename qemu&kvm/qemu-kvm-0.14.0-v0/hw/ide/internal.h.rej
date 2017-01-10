@@ -1,0 +1,19 @@
+--- hw/ide/internal.h	2011-02-22 19:04:38.000000000 +0530
++++ hw/ide/internal.h	2012-10-01 12:05:53.118620656 +0530
+@@ -511,6 +511,7 @@
+     return bus->ifs + bus->unit;
+ }
+ 
++
+ static inline void ide_set_irq(IDEBus *bus)
+ {
+     if (!(bus->cmd & IDE_CMD_DISABLE_IRQ)) {
+@@ -518,6 +519,8 @@
+     }
+ }
+ 
++
++
+ /* hw/ide/core.c */
+ extern const VMStateDescription vmstate_ide_bus;
+ 

@@ -30,6 +30,7 @@ typedef struct BDRVQrowState
 	BlockDriverState *qrow_map_file;
 	BlockDriverState *qrow_data_file;
 	//BlockDriverState *qrow_log_file;
+	//BlockDriverState *qrow_log_file;
     uint64_t total_sectors; 
 	uint64_t disk_size; // ¾µÏñ´óÐ¡£¬×Ö½Ú
 	uint64_t byte_offset;
@@ -44,6 +45,14 @@ typedef struct BDRVQrowState
 	char *meta_file;
 	char *map_file;
 	char *data_file;
+	FILE *outFile;
+	
+	//zyy
+	uint64_t read_total_sectors;
+	uint64_t read_sectors;
+	uint64_t aio_read_sectors;
+	//end 
+	
 	//char *log_file;
 }BDRVQrowState;
 

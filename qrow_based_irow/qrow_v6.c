@@ -1,6 +1,9 @@
 /* QROW格式块设备驱动
  * zyy 2016
  * */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h> 
 #include "qemu-common.h"
 #include "block_int.h"
 #include "module.h"
@@ -26,6 +29,7 @@
 #define QROW_DEBUG_WRITE
 //#define QROW_DEBUG_AIO_READV
 //#define QROW_DEBUG_AIO_WRITEV
+
 
 
 static void dump_QEMUIOVector(QEMUIOVector *qiov) {
@@ -152,6 +156,13 @@ static void qrow_close(BlockDriverState *bs) {
 		qemu_free(s->map_file);
 		s->map_file = NULL;
 	}
+	
+	if(s->outFile)
+	{
+		fclose (s->outFile);
+	}
+	
+	
 /*  log_file
 	if(s->log_file) {
 #ifdef QROW_DEBUG
@@ -183,7 +194,13 @@ static void qrow_close(BlockDriverState *bs) {
 		bdrv_delete(s->qrow_map_file);
 		s->qrow_map_file = NULL;
 	}
-	
+	if(s->qrow_map_file) {
+#ifdef QROW_DEBUG
+		printf("delete qrow_map_file\n");
+#endif
+		bdrv_delete(s->qrow_map_file);
+		s->qrow_map_file = NULL;
+	}
 /*
 	if(s->qrow_log_file) {
 #ifdef QROW_DEBUG
@@ -223,6 +240,46 @@ end:
 #endif
 	return ret;
 }
+
+static int qrow_open_log_file(BDRVQrowState *bqrows, int flags) {
+
+	int ret = 0;
+#ifdef QROW_DEBUG
+	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_open_data_file()\n");
+#endif
+	
+	if(strlen(bqrows->meta_file) + strlen("log") + 1 >= MAX_FILE_NAME_LENGTH) {
+		fprintf(stderr, "Invalid filename length, max is %d\n", MAX_FILE_NAME_LENGTH);
+		ret = -1;
+		goto end;
+	}
+	char *log_file = NULL;
+	log_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
+	strcpy(log_file, bqrows->meta_file);
+	strcat(log_file, ".");
+	strcat(log_file, "log");
+	bqrows->outFile = fopen (log_file, "wt");
+	if(bqrows->outFile==NULL)
+    {
+        printf("cant open the outfile");
+        ret = -1;
+		goto end;
+	}
+	
+	
+	
+end:
+#ifdef QROW_DEBUG
+	printf("qrow_open_log_file() return %d" QROW_DEBUG_END_STR, ret);
+#endif
+	if(log_file)
+	{
+		qemu_free(log_file);
+		log_file = NULL;
+	}
+	return ret;
+}
+
 static int qrow_open_map_file(BDRVQrowState *bqrows, int flags) {
 
 	int ret = 0;
@@ -315,7 +372,21 @@ static int qrow_open_meta_file(BlockDriverState *bs, BDRVQrowState *bqrows,int f
 	bqrows->data_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
 	pstrcpy(bqrows->data_file, MAX_FILE_NAME_LENGTH, meta.data_file);
 	pstrcpy(bs->backing_file, sizeof(bs->backing_file),meta.backing_file);
+	/*
+	bqrows->log_file = NULL;
+	bqrows->log_file = qemu_malloc(MAX_FILE_NAME_LENGTH);
+	if(qrow_generate_filename(bqrows->log_file, meta.meta_file, "log") < 0) { // map_file文件
+   		ret = -1;
+   		goto end;
+   	}
+   	*/
 	//log_file还没处理的，
+	
+	//zyy
+	bqrows->read_total_sectors = 0;
+	bqrows->read_sectors = 0;
+	bqrows->aio_read_sectors = 0;
+	//end
 #ifdef QROW_DEBUG
 	printf("backing_file \"%s\"\n", bs->backing_file);
 #endif
@@ -351,6 +422,10 @@ static int qrow_open(BlockDriverState *bs, int flags) {
     
     // 再打开data_file文件
     if(qrow_open_data_file(s, flags) < 0) {
+    	goto fail;
+    }
+    // 再打开log_file文件
+    if(qrow_open_log_file(s, flags) < 0) {
     	goto fail;
     }
     
@@ -407,7 +482,10 @@ static int bubbleSort(QrowReadState* readState, int len)
 static int qrow_read(BlockDriverState *bs, int64_t sector_num, uint8_t *buf, int nb_sectors) {
 	int ret = 0;
 	BDRVQrowState *s = bs->opaque;
-	
+	s->read_sectors += nb_sectors;
+	s->read_total_sectors += nb_sectors;
+	fprintf(s->outFile,"qrow_read: sector_num: %" PRId64 ", nb_sectors: %d\n", sector_num, nb_sectors);
+	fprintf(s->outFile,"read_sectors: %" PRId64 ", read_total_sectors: %" PRId64 "\n", s->read_sectors, s->read_total_sectors);
 	//
 	QrowReadState *readState = NULL;
 	readState = qemu_mallocz(nb_sectors*sizeof(QrowReadState));
@@ -452,6 +530,7 @@ end:
 
 static int qrow_write(BlockDriverState *bs, int64_t sector_num, const uint8_t *buf, int nb_sectors) {
 	BDRVQrowState *s = bs->opaque;
+	//fprintf(s->outFile,"qrow_write: sector_num: %" PRId64 ", nb_sectors: %d\n", sector_num, nb_sectors);
 	int64_t sector_offset;
 	int ret = 0;
 	if (s->sector_offset >= s->total_sectors){ //磁盘已满
@@ -769,10 +848,13 @@ static BlockDriverAIOCB *qrow_aio_readv(BlockDriverState *bs,
     QRowAIOCB *acb;
     BDRVQrowState *bqrows = bs->opaque;
     BlockDriver *drv;
-
+    bqrows->aio_read_sectors += nb_sectors;
+	bqrows->read_total_sectors += nb_sectors;
+	fprintf(bqrows->outFile,"qrow_aio_readv: sector_num: %" PRId64 ", nb_sectors: %d\n", sector_num, nb_sectors);
+	fprintf(bqrows->outFile,"aio_read_sectors: %" PRId64 ", read_total_sectors: %" PRId64 "\n", bqrows->aio_read_sectors, bqrows->read_total_sectors);
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_aio_readv()\n");
-	printf("sector_num %" PRId64 ", nb_sectors %d\n", sector_num, nb_sectors);
+	printf("qrow_aio_readv:sector_num %" PRId64 ", nb_sectors %d\n", sector_num, nb_sectors);
 #endif
 #ifdef QROW_DEBUG_DETAIL
 	dump_QEMUIOVector(qiov);
@@ -809,7 +891,8 @@ static BlockDriverAIOCB *qrow_aio_writev(BlockDriverState *bs,
 	BDRVQrowState *s = bs->opaque;
 	BlockDriverAIOCB *ret = NULL;
 	BlockDriver *drv;
-
+	//将打印信息写到log_file文件 
+	//fprintf(s->outFile,"qrow_aio_writev: sector_num: %" PRId64 ", nb_sectors: %d\n", sector_num, nb_sectors);
 #ifdef QROW_DEBUG
 	printf(QROW_DEBUG_BEGIN_STR "We are in qrow_aio_writev()\n");
 	printf("sector_num %" PRId64 ", nb_sectors %d", sector_num, nb_sectors);

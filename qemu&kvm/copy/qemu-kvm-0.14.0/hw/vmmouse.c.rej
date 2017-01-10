@@ -1,0 +1,59 @@
+--- hw/vmmouse.c	2011-02-22 19:04:38.000000000 +0530
++++ hw/vmmouse.c	2012-08-07 12:36:46.240392229 +0530
+@@ -26,6 +26,8 @@
+ #include "ps2.h"
+ #include "pc.h"
+ 
++
++
+ /* debug only vmmouse */
+ //#define DEBUG_VMMOUSE
+ 
+@@ -161,19 +163,33 @@
+ 
+     DPRINTF("vmmouse_data(%d)\n", size);
+ 
+-    if (size == 0 || size > 6 || size > s->nb_queue) {
+-        printf("vmmouse: driver requested too much data %d\n", size);
++	//kvm rr
++
++	/*
++    if ((size == 0 || size > 6 || size > s->nb_queue)) {
++        printf("vmmouse: driver requested too much data %d qs %d\n", size,s->nb_queue);
+         s->status = 0xffff;
+         vmmouse_remove_handler(s);
+         return;
+-    }
++    }*/
++	if(size == 0 || size > 6)
++	{
++		printf("vmmouse: driver requested too much data %d\n",size);
++		s->status = 0xffff;
++		vmmouse_remove_handler(s);
++		return ;
++	}
++	
++		
++	int avail_size = (size < s->nb_queue)? size : s->nb_queue;
+ 
+-    for (i = 0; i < size; i++)
++    for (i = 0; i < avail_size; i++)
+         data[i] = s->queue[i];
+ 
+-    s->nb_queue -= size;
++    s->nb_queue -= avail_size;
+     if (s->nb_queue)
+         memmove(s->queue, &s->queue[size], sizeof(s->queue[0]) * s->nb_queue);
++	// end kvm rr
+ }
+ 
+ static void vmmouse_get_data(uint32_t *data)
+@@ -210,6 +226,8 @@
+ 
+     command = data[2] & 0xFFFF;
+ 
++DPRINTF("addr %x command %x\n",addr,command);
++
+     switch (command) {
+     case VMMOUSE_STATUS:
+         data[0] = vmmouse_get_status(s);

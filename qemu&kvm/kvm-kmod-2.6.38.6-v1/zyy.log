@@ -1,0 +1,63 @@
+make -C /home/zhangyy/linux-2.6.38.8 M=`pwd` clean
+make[1]: Entering directory `/home/zhangyy/linux-2.6.38.8'
+  CLEAN   /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/.tmp_versions
+make[1]: Leaving directory `/home/zhangyy/linux-2.6.38.8'
+make -C /home/zhangyy/linux-2.6.38.8 M=`pwd` \
+		LINUXINCLUDE="-I`pwd`/include -Iinclude \
+			 -Iarch/x86/include \
+			-I`pwd`/include-compat -I`pwd`/x86 \
+			-include  include/generated/autoconf.h \
+			-include `pwd`/x86/external-module-compat.h" \
+		"$@"
+make[1]: Entering directory `/home/zhangyy/linux-2.6.38.8'
+  LD      /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/built-in.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/svm.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/vmx.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm_rr.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm_main.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/x86.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/mmu.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/emulate.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/irq.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/i8259.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/lapic.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/ioapic.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/preempt.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/i8254.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/coalesced_mmio.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/irq_comm.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/timer.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/eventfd.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/assigned-dev.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/compat-x86.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/async_pf.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/../external-module-compat.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/iommu.o
+  CC [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/../srcu.o
+  LD [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm.o
+  LD [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-intel.o
+  LD [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-amd.o
+  LD      /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/built-in.o
+  Building modules, stage 2.
+  MODPOST 3 modules
+  CC      /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-amd.mod.o
+  CC      /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-intel.mod.o
+  CC      /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm.mod.o
+  LD [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-amd.ko
+  LD [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-intel.ko
+  LD [M]  /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm.ko
+make[1]: Leaving directory `/home/zhangyy/linux-2.6.38.8'
+mkdir -p ///usr/local/include/kvm-kmod/asm/
+install -m 644 usr/include/asm-x86/*.h ///usr/local/include/kvm-kmod/asm/
+mkdir -p ///usr/local/include/kvm-kmod/linux/
+install -m 644 usr/include/linux/*.h ///usr/local/include/kvm-kmod/linux/
+sed 's|PREFIX|/usr/local|; s/VERSION/kvm-kmod-2.6.38.6/' kvm-kmod.pc > .tmp.kvm-kmod.pc
+install -m 644 -D .tmp.kvm-kmod.pc ///usr/local/lib/pkgconfig/kvm-kmod.pc
+make -C /home/zhangyy/linux-2.6.38.8 M=`pwd` INSTALL_MOD_PATH=// modules_install
+make[1]: Entering directory `/home/zhangyy/linux-2.6.38.8'
+  INSTALL /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-amd.ko
+  INSTALL /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm-intel.ko
+  INSTALL /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/kvm.ko
+  DEPMOD  2.6.38.8
+make[1]: Leaving directory `/home/zhangyy/linux-2.6.38.8'
+install -m 644 -D scripts/65-kvm.rules //etc/udev/rules.d/65-kvm.rules

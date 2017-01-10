@@ -1,0 +1,25 @@
+--- hw/ide/piix.c	2011-02-22 19:04:38.000000000 +0530
++++ hw/ide/piix.c	2012-10-01 11:51:14.078620224 +0530
+@@ -50,7 +50,7 @@
+         break;
+     }
+ #ifdef DEBUG_IDE
+-    printf("bmdma: readb 0x%02x : 0x%02x\n", addr, val);
++    printf("here bmdma: readb 0x%02x : 0x%02x\n", addr, val);
+ #endif
+     return val;
+ }
+@@ -59,11 +59,12 @@
+ {
+     BMDMAState *bm = opaque;
+ #ifdef DEBUG_IDE
+-    printf("bmdma: writeb 0x%02x : 0x%02x\n", addr, val);
++    printf("here bmdma: writeb 0x%02x : 0x%02x\n", addr, val);
+ #endif
+     switch(addr & 3) {
+     case 2:
+         bm->status = (val & 0x60) | (bm->status & 1) | (bm->status & ~val & 0x06);
++	
+         break;
+     }
+ }

@@ -1,0 +1,1 @@
+cmd_/home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/built-in.o :=  rm -f /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/built-in.o; ar rcs /home/zhangyy/qrow/qemu-kvm/kvm-kmod-2.6.38.6-v1/x86/built-in.o

@@ -1,0 +1,19 @@
+--- linux-user/signal.c	2011-02-22 19:04:38.000000000 +0530
++++ linux-user/signal.c	2012-09-19 18:55:19.782708999 +0530
+@@ -31,7 +31,7 @@
+ #include "qemu-common.h"
+ #include "target_signal.h"
+ 
+-//#define DEBUG_SIGNAL
++#define DEBUG_SIGNAL
+ 
+ static struct target_sigaltstack target_sigaltstack_used = {
+     .ss_sp = 0,
+@@ -44,6 +44,7 @@
+ static void host_signal_handler(int host_signum, siginfo_t *info,
+                                 void *puc);
+ 
++
+ static uint8_t host_to_target_signal_table[_NSIG] = {
+     [SIGHUP] = TARGET_SIGHUP,
+     [SIGINT] = TARGET_SIGINT,

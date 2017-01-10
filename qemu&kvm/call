@@ -1,0 +1,402 @@
+qemu
+vl.c
+main(){
+	default_drive(){
+		drive_init(){
+			bdrv_open();
+		}
+	}
+}
+
+
+
+virtio_blk_init(){
+	virtio_blk_dma_restart_cb(){
+		virtio_blk_dma_restart_bh(){
+			virtio_blk_handle_request(){
+				virtio_blk_handle_write(){
+					virtio_submit_multiwrite(BlockDriverState *bs, MultiReqBuffer *mrb){
+						bdrv_aio_multiwrite(BlockDriverState *bs, BlockRequest *reqs, int num_reqs){
+							for (i = 0; i < num_reqs; i++) {
+								acb = bdrv_aio_writev(bs, reqs[i].sector, reqs[i].qiov,
+            reqs[i].nb_sectors, multiwrite_cb, mcb);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+
+
+virtio_blk_init(){
+	virtio_blk_handle_output(){
+		virtio_blk_handle_request(){
+			virtio_blk_handle_write(){
+				virtio_submit_multiwrite(){
+					bdrv_aio_multiwrite(){
+						bdrv_aio_writev();
+					}
+				}
+			}
+		}
+	}
+
+}
+
+
+kvm_handle_io(uint16_t port, void *data, int direction, int size,uint32_t count){
+	 uint8_t *ptr = data;
+	 cpu_outb(port, ldub_p(ptr)){
+		ioport_write(0, port, ldub_p(ptr)){
+			IOPortWriteFunc *func = ioport_write_table[0][port];
+			func(ioport_opaque[port], port, ldub_p(ptr));
+			
+		}
+	 }
+ 
+}
+
+
+ioport_write_table
+register_ioport_write(pio_addr_t start, int length, int size,IOPortWriteFunc *func, void *opaque){
+	ioport_write_table[bsize][i] = func;
+
+}
+
+void isa_unassign_ioport(pio_addr_t start, int length){
+	ioport_write_table[0][i] = default_ioport_writeb{
+		static void default_ioport_writeb(void *opaque, uint32_t address, uint32_t data)
+		{
+			LOG_UNUSED_IOPORT("unused outb: port=0x%04"PRIx32" data=0x%02"PRIx32"\n",
+							  address, data);
+		}
+}
+    ioport_write_table[1][i] = default_ioport_writew;
+    ioport_write_table[2][i] = default_ioport_writel;
+}
+
+
+
+pio和mmio在kvm层的捕获，然后退出到qemu层进行处理，读取数据
+static int vmx_handle_exit(struct kvm_vcpu *vcpu){
+	handle_io(){
+		emulate_instruction(){
+			x86_emulate_insn(){
+				//处理mmio
+				rc = read_emulated(ctxt, ops, linear(ctxt, addr), dest, len){
+					//.read_emulated = emulator_read_emulated{
+						vcpu->mmio_needed = 1;
+						vcpu->run->exit_reason = KVM_EXIT_MMIO;
+						vcpu->run->mmio.phys_addr = vcpu->mmio_phys_addr = gpa;
+						vcpu->run->mmio.len = vcpu->mmio_size = bytes;
+						vcpu->run->mmio.is_write = vcpu->mmio_is_write = 0;
+					}
+				}
+				//下面是处理pio的
+				do_io_in:
+				pio_in_emulated(){
+					emulator_pio_in_emulated(){
+					
+					}
+				}
+				do_io_out:
+				pio_out_emulated(){
+					emulator_pio_out_emulated(){	
+					}
+				
+				}
+			}
+			
+		}
+		kvm_fast_pio_out(vcpu, size, port){
+			emulator_pio_out_emulated
+		
+		}
+	
+	}
+}
+
+emulator_pio_in_emulated(){
+	if (!kernel_pio(vcpu, vcpu->arch.pio_data){
+		int r;
+
+		if (vcpu->arch.pio.in)
+			r = kvm_io_bus_read(vcpu->kvm, KVM_PIO_BUS, vcpu->arch.pio.port,
+						vcpu->arch.pio.size, pd){
+							int i;
+							struct kvm_io_bus *bus;
+
+							bus = srcu_dereference(kvm->buses[bus_idx], &kvm->srcu);
+							for (i = 0; i < bus->dev_count; i++)
+								if (!kvm_iodevice_read(bus->devs[i], addr, len, val){
+										return dev->ops->read ? dev->ops->read(dev, addr, l, v) : -EOPNOTSUPP;
+									})
+									return 0;
+							return -EOPNOTSUPP;
+						}
+		else
+			r = kvm_io_bus_write(vcpu->kvm, KVM_PIO_BUS,
+						 vcpu->arch.pio.port, vcpu->arch.pio.size,
+						 pd);
+		return r;
+		}) 
+	{
+
+		data_avail:
+		// kvm rr
+		// record the data which is presented by kernel instead of 
+		// user space
+		kvm_run = vcpu->run;
+		kvm_rr_pio_handle(vcpu,kvm_run);
+		// end kvm rr 
+		memcpy(val, vcpu->arch.pio_data, size * count);
+		vcpu->arch.pio.count = 0;
+		return 1;
+	}
+	vcpu->run->exit_reason = KVM_EXIT_IO;
+	vcpu->run->io.direction = KVM_EXIT_IO_IN;
+	vcpu->run->io.size = size;
+	vcpu->run->io.data_offset = KVM_PIO_PAGE_OFFSET * PAGE_SIZE;
+	vcpu->run->io.count = count;
+	vcpu->run->io.port = port;
+
+	return 0;
+}
+
+qemu处理好pio和mmio的数据后，再次通过ioctl进去kvm层下面的函数，
+kvm_arch_vcpu_ioctl_run(){
+	
+	if (vcpu->arch.pio.count || vcpu->mmio_needed) {
+		// kvm rr
+		
+		/*
+		if(vcpu->arch.pio.count && vcpu->arch.pio.in )
+		{
+			kvm_rr_pio_handle(vcpu, kvm_run);	
+		}*/
+		// handled while final insn emulation is 
+		// called 
+		// end kvm rr
+				
+		if (vcpu->mmio_needed) {
+			// kvm rr
+			
+			kvm_rr_mmio_handle(vcpu, kvm_run);	
+			
+			// end kvm rr
+			memcpy(vcpu->mmio_data, kvm_run->mmio.data, 8); //将qemu读取到的数据存入相应位置
+			vcpu->mmio_read_completed = 1;
+			vcpu->mmio_needed = 0;
+		}
+	
+		vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
+		r = emulate_instruction(vcpu, EMULTYPE_NO_DECODE){
+			return x86_emulate_instruction(vcpu, 0, EMULTYPE_NO_DECODE, NULL, 0){
+				r = x86_emulate_insn(&vcpu->arch.emulate_ctxt){  //这个函数主要涉及pio
+					do_io_in:
+					pio_in_emulated(){
+						emulator_pio_in_emulated(){
+							data_avail:
+								// kvm rr
+								// record the data which is presented by kernel instead of 
+								// user space
+								kvm_run = vcpu->run;
+								kvm_rr_pio_handle(vcpu,kvm_run);
+								// end kvm rr 
+								memcpy(val, vcpu->arch.pio_data, size * count);  //将qemu读取到的数据存入相应位置
+								vcpu->arch.pio.count = 0;
+								return 1;
+						}
+					}
+					do_io_out:
+					pio_out_emulated(){
+						emulator_pio_out_emulated(){	
+						}
+					
+					}
+				}
+		}
+		
+
+	}
+	
+	r = __vcpu_run(vcpu);
+	
+}
+
+
+
+
+
+
+
+
+
+(gdb) bt
+#0  bdrv_aio_readv (bs=0x1352430, sector_num=0, qiov=0x1be1f08, nb_sectors=8, cb=0x5965f0 <dma_bdrv_cb>, opaque=0x1be1eb0)
+    at block.c:2043
+#1  0x0000000000596741 in dma_bdrv_cb (opaque=0x1be1eb0, ret=0) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/dma-helpers.c:123
+#2  0x00000000005968c4 in dma_bdrv_io (bs=0x1352430, sg=0x1bd3598, sector_num=0, cb=<value optimized out>, 
+    opaque=<value optimized out>, is_write=0) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/dma-helpers.c:167
+#3  0x000000000058e9d2 in ide_dma_cb (opaque=0x1bd3308, ret=<value optimized out>)
+    at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/hw/ide/core.c:541
+#4  0x000000000058fbe8 in bmdma_cmd_writeb (opaque=0x1bd4030, addr=<value optimized out>, val=<value optimized out>)
+    at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/hw/ide/pci.c:313
+#5  0x000000000042fa6e in kvm_handle_io (env=0x135bbe0) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/kvm-all.c:818
+
+
+#0  bdrv_aio_writev (bs=0x1352d80, sector_num=2048, qiov=0x1422458, nb_sectors=16, cb=0x5964a0 <dma_bdrv_cb>, opaque=0x1422400)
+    at block.c:2104
+#1  0x0000000000438eef in bdrv_aio_writev (bs=0x1352430, sector_num=2048, qiov=0x1422458, nb_sectors=16, cb=0x5964a0 <dma_bdrv_cb>, 
+    opaque=0x1422400) at block.c:2125
+#2  0x000000000059663d in dma_bdrv_cb (opaque=0x1422400, ret=0) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/dma-helpers.c:120
+#3  0x0000000000596774 in dma_bdrv_io (bs=0x1352430, sg=0x141f1c8, sector_num=2048, cb=<value optimized out>, 
+    opaque=<value optimized out>, is_write=1) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/dma-helpers.c:167
+#4  0x000000000058e9c4 in ide_dma_cb (opaque=0x141ef38, ret=<value optimized out>)
+    at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/hw/ide/core.c:544
+#5  0x000000000058fa98 in bmdma_cmd_writeb (opaque=0x141fc60, addr=<value optimized out>, val=<value optimized out>)
+    at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/hw/ide/pci.c:313
+#6  0x000000000042fa6e in kvm_handle_io (env=0x1359240) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/kvm-all.c:818
+#7  kvm_run (env=0x1359240) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/qemu-kvm.c:779
+#8  0x000000000042fd39 in kvm_cpu_exec (env=0x1352d80) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/qemu-kvm.c:1399
+#9  0x0000000000431045 in kvm_main_loop_cpu (_env=0x1359240) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/qemu-kvm.c:1585
+#10 ap_main_loop (_env=0x1359240) at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/qemu-kvm.c:1632
+#11 0x00007ffff79c18ca in start_thread () from /lib/libpthread.so.0
+#12 0x00007ffff6e46b6d in clone () from /lib/libc.so.6
+#13 0x0000000000000000 in ?? ()
+
+
+
+			bmdma_cmd_writeb(){
+				if (bm->dma_cb)
+					bm->dma_cb(bmdma_active_if(bm), 0){
+						if (s->is_read) {
+							s->bus->dma->aiocb = dma_bdrv_read(s->bs, &s->sg, sector_num,ide_dma_cb, s){
+								dma_bdrv_io(BlockDriverState *bs, QEMUSGList *sg, uint64_t sector_num,BlockDriverCompletionFunc *cb, void *opaque,int is_write){
+									dma_bdrv_cb(){
+										bdrv_aio_readv;
+									}
+							}
+						} else {
+							s->bus->dma->aiocb = dma_bdrv_write(s->bs, &s->sg, sector_num,ide_dma_cb, s){
+								dma_bdrv_io(){
+									bdrv_aio_writev;
+								}
+							}
+		
+						}
+					}
+			}
+		}
+	
+	
+	
+
+
+
+
+
+#0  bdrv_read (bs=0x1352d60, sector_num=0, buf=0x7fffffffd610 "", nb_sectors=4) at block.c:923
+#1  0x000000000043aab7 in bdrv_pread (bs=<value optimized out>, offset=<value optimized out>, buf=0x7fffffffd610, count1=2048)
+    at block.c:1018
+#2  0x000000000043ba64 in find_image_format (bs=0x1352430, filename=0x134eea0 "/home/zhangyy/qrow/vm/qrow1213.img", flags=2, drv=0x0)
+    at block.c:366
+#3  bdrv_open (bs=0x1352430, filename=0x134eea0 "/home/zhangyy/qrow/vm/qrow1213.img", flags=2, drv=0x0) at block.c:593
+#4  0x0000000000461284 in drive_init (opts=0x134ecf0, default_to_scsi=<value optimized out>) at blockdev.c:548
+#5  0x000000000041892b in drive_init_func (opts=0x1352d60, opaque=<value optimized out>)
+    at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/vl.c:653
+#6  0x000000000043360a in qemu_opts_foreach (list=<value optimized out>, func=0x418910 <drive_init_func>, opaque=0x941100, 
+    abort_on_failure=<value optimized out>) at qemu-option.c:971
+#7  0x000000000041a981 in main (argc=8, argv=<value optimized out>, envp=<value optimized out>)
+    at /home/zhangyy/qrow/qemu-kvm/qemu-kvm-0.14.0-v1/vl.c:3040
+	
+	
+	
+	
+kvm_run(){
+
+	r = kvm_handle_io(run->io.port,(uint8_t *)run + run->io.data_offset,run->io.direction,run->io.size,run->io.count)(112,*,0,1,1){
+		cpu_inb (addr=113){
+			ioport_read(0, addr=113) {
+				IOPortWriteFunc *func = ioport_read_table[index][address];(ioport_read_table[index][address]=cmos_ioport_read)
+				cmos_ioport_read (opaque=0x13ff910, addr=113){
+					
+				}
+			}
+			
+
+		}
+	}
+	
+}
+
+static void ide_map(PCIDevice *pci_dev, int region_num,pcibus_t addr, pcibus_t size, int type){
+	PCIIDEState *d = DO_UPCAST(PCIIDEState, dev, pci_dev);
+	bus = &d->bus[(region_num >> 1)];
+	register_ioport_read(iobase, 2, 2, ide_data_readw, bus);
+}
+//
+
+
+
+
+DeviceState *qdev_device_add(QemuOpts *opts){
+	if (qdev_init(qdev) < 0) {
+        qerror_report(QERR_DEVICE_INIT_FAILED, driver);
+        return NULL;
+    }
+}
+int qdev_init(DeviceState *dev)
+{
+    int rc;
+
+    assert(dev->state == DEV_STATE_CREATED);
+    rc = dev->info->init(dev, dev->info);
+    if (rc < 0) {
+        qdev_free(dev);
+        return rc;
+    }
+    if (dev->info->vmsd) {
+        vmstate_register_with_alias_id(dev, -1, dev->info->vmsd, dev,
+                                       dev->instance_id_alias,
+                                       dev->alias_required_for_version);
+    }
+    dev->state = DEV_STATE_INITIALIZED;
+    return 0;
+}
+
+void isa_qdev_register(ISADeviceInfo *info)
+{
+    info->qdev.init = isa_qdev_init;
+    info->qdev.bus_info = &isa_bus_info;
+    qdev_register(&info->qdev);
+}
+static int isa_qdev_init(DeviceState *qdev, DeviceInfo *base)
+{
+    ISADevice *dev = DO_UPCAST(ISADevice, qdev, qdev);
+    ISADeviceInfo *info = DO_UPCAST(ISADeviceInfo, qdev, base);
+    return info->init(dev);
+}
+ISADeviceInfo isa_ide_info{
+.init = isa_ide_initfn;
+}
+static int isa_ide_initfn(ISADevice *dev)
+void ide_init_ioport(IDEBus *bus, int iobase, int iobase2){
+	register_ioport_read(iobase, 2, 2, ide_data_readw, bus);
+}
+
+
+//
+static void pci_piix_init_ports(PCIIDEState *d)
+void ide_init_ioport(IDEBus *bus, int iobase, int iobase2){
+	register_ioport_read(iobase, 2, 2, ide_data_readw, bus);
+}
+
+
+static void vt82c686b_init_ports(PCIIDEState *d)
+void ide_init_ioport(IDEBus *bus, int iobase, int iobase2){
+	register_ioport_read(iobase, 2, 2, ide_data_readw, bus);
+}

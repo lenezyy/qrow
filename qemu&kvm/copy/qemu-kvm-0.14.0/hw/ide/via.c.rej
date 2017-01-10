@@ -1,0 +1,20 @@
+--- hw/ide/via.c	2011-02-22 19:04:38.000000000 +0530
++++ hw/ide/via.c	2012-10-01 11:52:28.046620260 +0530
+@@ -51,7 +51,7 @@
+         break;
+     }
+ #ifdef DEBUG_IDE
+-    printf("bmdma: readb 0x%02x : 0x%02x\n", addr, val);
++    printf("via bmdma: readb 0x%02x : 0x%02x\n", addr, val);
+ #endif
+     return val;
+ }
+@@ -60,7 +60,7 @@
+ {
+     BMDMAState *bm = opaque;
+ #ifdef DEBUG_IDE
+-    printf("bmdma: writeb 0x%02x : 0x%02x\n", addr, val);
++    printf("via bmdma: writeb 0x%02x : 0x%02x\n", addr, val);
+ #endif
+     switch (addr & 3) {
+     case 2:

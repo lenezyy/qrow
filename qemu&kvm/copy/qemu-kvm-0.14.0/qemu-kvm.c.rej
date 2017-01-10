@@ -1,0 +1,113 @@
+--- qemu-kvm.c	2012-09-12 14:51:15.819547777 +0530
++++ qemu-kvm.c	2012-10-07 16:59:21.584446711 +0530
+@@ -57,14 +57,13 @@
+ 
+ //kvm rr
+ 
+-#define RECORDING
+-#define KVM_MAX_LOG_SIZE (1<<20)
+-static int is_replay_initialized;
+-
+-#include <update_next_br_count.c> 
+ 
+-extern int is_replaying;
+ static int is_record_initialized;
++static int is_replay_initialized;
++int log_file_fd = 0;
++char log_file_name[256];
++int record_vm = 0;
++int replay_vm = 0;
+ // kvm rr
+ 
+ 
+@@ -618,35 +618,63 @@
+         pthread_kill(env->kvm_cpu_state.thread, SIG_IPI);
+     }
+ 	// kvm rr
+-
+-#ifdef RECORDING
+-	if(!is_record_initialized)
++	if(record_vm && !is_record_initialized)
+ 	{
++		int i;
++		run->ring_buf_user_ptr = 0;
++		run->ring_buf_kvm_ptr = 0;
++		run->used_buffers = 0;
++		run->log_offset = -1;
++		for(i=0;i<KVM_RR_RING_BUF_SIZE;i++)
++		{
++			run->ring_buffers[i] = malloc(KVM_MAX_LOG_SIZE);
++		}
++		
+ 		is_record_initialized = 1;
+-		struct kvm_record_arg args;
+-		strcpy(args.filename,"/home/kumaran/MTP/logs/testing.log");
+-		args.log_buf = malloc(KVM_MAX_LOG_SIZE);
+-		printf("log_buf is at %x %d\n",args.log_buf,kvm_state->vmfd);
+-		//ioctl(kvm_state->vmfd, KVM_ENABLE_RR, &args);
++		ioctl(kvm_state->vmfd, KVM_ENABLE_RR);
+ 
+ 	}
+-#else
+-	if(!is_replay_initialized)
++	else if(replay_vm && !is_replay_initialized)
+ 	{
++		int i;
++		run->ring_buf_user_ptr = 0;
++		run->ring_buf_kvm_ptr = 0;
++		run->used_buffers = 0;
++		run->log_offset = -1;
++		for(i=0;i<KVM_RR_RING_BUF_SIZE;i++)
++		{
++			run->ring_buffers[i] = malloc(KVM_MAX_LOG_SIZE);
++		}
++	
++		// fill the buffer with data before starting
++		for(i=0;i<KVM_RR_RING_BUF_SIZE;i++)
++		{
++			r = read(log_file_fd, run->ring_buffers[run->ring_buf_user_ptr], KVM_MAX_LOG_SIZE);
++			if(r<0)
++			{
++				fprintf(stderr,"Couldn't read from logfile\n");
++				abort();
++			}
++			if(r)
++			{
++				run->ring_buf_user_ptr = (run->ring_buf_user_ptr + 1) % KVM_RR_RING_BUF_SIZE;
++				run->used_buffers++;
++			}
++			else
++			{
++				//log file exhausted do move the ptr and
++				//don't increment the available buffers	
++				break;
++			}
++			
++		}
++
+ 		is_replay_initialized = 1;
+ 		//before enabling the replay
+ 		// parse the log file and update next br count in ext intr
+ 		// records
+-		update_next_br_count("/home/kumaran/MTP/logs/testing.log");
+-		
+-		struct kvm_record_arg args;
+-                strcpy(args.filename,"/home/kumaran/MTP/logs/testing.log");
+-                args.log_buf = malloc(KVM_MAX_LOG_SIZE);
+-                printf("log_buf is at %x\n",args.log_buf);
+-
+-		ioctl(kvm_state->vmfd, KVM_ENABLE_RPLY,&args);
++		ioctl(kvm_state->vmfd, KVM_ENABLE_RPLY);
+ 	}
+-#endif
+ 
+ 	// end kvm rr
+     r = ioctl(fd, KVM_RUN, 0);
+@@ -749,7 +834,6 @@
+ 			r = 0;
+ 			break;
+ 		}
+-		
+ 		// end kvm rr
+ 		//printf("rply %d p %d dir %d size %d count %d\n",run->is_replaying, run->io.port,run->io.direction,run->io.size, run->io.count);
+ 
